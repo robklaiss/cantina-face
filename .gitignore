@@ -1,0 +1,11 @@
+# Python / Virtualenv
+venv/
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+
+# Large model files (no versionar en Git)
+models/*.onnx
+models/*.zip

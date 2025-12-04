@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cantina Face - Administración</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+<body>
+    <!-- Barra Superior -->
+    <div id="status-bar">
+        <span>Admin Panel</span>
+        <button id="back-to-main" class="back-btn">← Volver al Menú</button>
+    </div>
+
+    <div id="admin-container">
+        <!-- Sidebar de Navegación -->
+        <div id="admin-sidebar">
+            <h2>Administración</h2>
+            <nav id="admin-nav">
+                <button class="nav-btn active" data-section="students">👥 Estudiantes</button>
+                <button class="nav-btn" data-section="products">🛒 Productos</button>
+                <button class="nav-btn" data-section="transactions">💰 Transacciones</button>
+                <button class="nav-btn" data-section="analytics">📊 Analíticas</button>
+            </nav>
+        </div>
+
+        <!-- Contenido Principal -->
+        <div id="admin-content">
+            <!-- Sección de Estudiantes -->
+            <div id="students-section" class="admin-section active">
+                <div class="section-header">
+                    <h3>Gestión de Estudiantes</h3>
+                    <div class="section-actions">
+                        <input type="text" id="student-search" placeholder="Buscar estudiante..." />
+                        <button id="add-student-btn" class="primary-btn">+ Nuevo Estudiante</button>
+                    </div>
+                </div>
+
+                <div id="students-grid" class="students-grid">
+                    <!-- Students will be loaded here -->
+                </div>
+            </div>
+
+            <!-- Sección de Productos -->
+            <div id="products-section" class="admin-section">
+                <div class="section-header">
+                    <h3>Gestión de Productos</h3>
+                    <button id="add-product-btn" class="primary-btn">+ Nuevo Producto</button>
+                </div>
+                <div id="products-list">
+                    <!-- Products will be loaded here -->
+                </div>
+            </div>
+
+            <!-- Sección de Transacciones -->
+            <div id="transactions-section" class="admin-section">
+                <div class="section-header">
+                    <h3>Historial de Transacciones</h3>
+                    <div class="filters">
+                        <select id="transaction-filter">
+                            <option value="">Todos los estudiantes</option>
+                        </select>
+                        <input type="date" id="date-from" />
+                        <input type="date" id="date-to" />
+                        <button id="transactions-run-btn" class="primary-btn">Ejecutar</button>
+                    </div>
+                </div>
+                <div id="transactions-list">
+                    <!-- Transactions will be loaded here -->
+                </div>
+            </div>
+
+            <!-- Sección de Analíticas -->
+            <div id="analytics-section" class="admin-section">
+                <div class="section-header">
+                    <h3>Analíticas y Reportes</h3>
+                </div>
+                <div class="analytics-grid">
+                    <div class="analytics-card">
+                        <h4>Productos Más Vendidos</h4>
+                        <div id="top-products"></div>
+                    </div>
+                    <div class="analytics-card">
+                        <h4>Estudiantes Más Activos</h4>
+                        <div id="top-students"></div>
+                    </div>
+                    <div class="analytics-card">
+                        <h4>Ventas por Día</h4>
+                        <div id="daily-sales"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal para Editar Estudiante -->
+    <div id="student-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-title">Editar Estudiante</h3>
+                <button class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="student-edit-container">
+                    <!-- Foto y Cámara -->
+                    <div class="photo-section">
+                        <div class="current-photo">
+                            <img id="current-student-photo" src="" alt="Foto actual" />
+                            <div class="photo-actions">
+                                <button id="retake-photo-btn" class="secondary-btn">📸 Retomar Foto</button>
+                                <button id="add-photo-btn" class="secondary-btn">➕ Agregar Foto</button>
+                            </div>
+                        </div>
+                        <div id="camera-section" class="hidden">
+                            <video id="modal-video" autoplay playsinline muted></video>
+                            <div class="capture-controls">
+                                <button id="capture-btn" class="primary-btn">📸 Capturar</button>
+                                <button id="cancel-capture-btn" class="secondary-btn">Cancelar</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Información del Estudiante -->
+                    <div class="student-info">
+                        <form id="student-form">
+                            <div class="form-group">
+                                <label for="edit-name">Nombre:</label>
+                                <input type="text" id="edit-name" required />
+                            </div>
+                            <div class="form-group">
+                                <label for="edit-grade">Grado:</label>
+                                <input type="text" id="edit-grade" required />
+                            </div>
+                            <div class="form-group">
+                                <label for="edit-balance">Saldo (Gs.):</label>
+                                <input type="number" id="edit-balance" min="0" step="100" />
+                            </div>
+                            <div class="form-group">
+                                <label for="add-credits">Agregar Créditos:</label>
+                                <div class="credits-input">
+                                    <input type="number" id="add-credits" min="0" step="100" placeholder="0" />
+                                    <button type="button" id="add-credits-btn" class="secondary-btn">Agregar</button>
+                                </div>
+                            </div>
+                        </form>
+
+                        <!-- Historial de Compras -->
+                        <div class="purchase-history">
+                            <h4>Historial de Compras</h4>
+                            <div id="student-purchases"></div>
+                        </div>
+
+                        <!-- Productos Sugeridos -->
+                        <div class="suggested-products">
+                            <h4>Productos Sugeridos</h4>
+                            <div id="suggested-products-list"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="save-student-btn" class="primary-btn">💾 Guardar Cambios</button>
+                <button id="delete-student-btn" class="danger-btn">🗑️ Eliminar Estudiante</button>
+                <button class="close-btn secondary-btn">Cancelar</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notificaciones -->
+    <div id="notifications"></div>
+
+    <!-- Custom Confirmation Modal -->
+    <div id="custom-confirmation-modal" class="hidden"></div>
+
+    <script src="/admin.js"></script>
+</body>
+</html>
