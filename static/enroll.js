@@ -189,15 +189,9 @@ async function captureBurstFrames() {
 
     const isAttachMode = !!enrollExistingStudent;
 
-    // No usar ráfaga para modo "asignar a alumno existente" para evitar inconsistencias
-    if (isAttachMode) {
-        showNotification('Para asignar la cara a un alumno existente usa la captura rápida (1 foto).', 'error');
-        return;
-    }
-
     const name = studentNameInput.value.trim();
     const grade = studentGradeInput.value.trim();
-    if (!name || !grade) {
+    if (!isAttachMode && (!name || !grade)) {
         showNotification('Complete nombre y grado antes de usar la captura en ráfaga', 'error');
         return;
     }
@@ -215,40 +209,75 @@ async function captureBurstFrames() {
         }
     }
 
-    // Create FormData with multiple frames (solo para nuevo alumno, con datos completos)
+    // Create FormData with multiple frames
     const formData = new FormData();
-    formData.append('name', name);
-    formData.append('grade', grade);
     frames.forEach((frame, index) => {
         formData.append('frames', frame, `frame_${index}.jpg`);
     });
 
-    // Call burst enrollment API
-    const response = await fetch('/api/enroll_burst', {
-        method: 'POST',
-        body: formData
-    });
+    let response;
+    let result;
 
-    if (!response.ok) {
-        let detail = 'Error en registro por ráfaga';
-        try {
-            const errJson = await response.json();
-            detail = errJson.detail || detail;
-        } catch (_) {
-            try { detail = await response.text(); } catch (_) {}
+    if (isAttachMode) {
+        response = await fetch(`/api/students/${enrollExistingStudent.id}/attach-face-burst`, {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!response.ok) {
+            let detail = 'Error al asociar cara al alumno';
+            try {
+                const errJson = await response.json();
+                detail = errJson.detail || detail;
+            } catch (_) {
+                try { detail = await response.text(); } catch (_) {}
+            }
+            console.error('[attach_face_burst] status:', response.status, 'detail:', detail);
+            throw new Error(detail);
         }
-        console.error('[enroll_burst] status:', response.status, 'detail:', detail);
-        throw new Error(detail);
-    }
 
-    const result = await response.json();
+        result = await response.json();
 
-    // Show success with captured image
-    if (result.photo_path) {
-        currentPreview = frames[0]; // Use first frame as preview
-        updatePreview(frames[0]);
+        if (!result.success) {
+            let detail = result.detail || 'Error al asociar cara al alumno';
+            throw new Error(detail);
+        }
+
         embeddingState.textContent = '✅ Calculado';
-        showNotification(`✅ Registrado: ${result.name}`, 'success');
+        showNotification(`✅ Cara asociada a ${enrollExistingStudent.name}`, 'success');
+
+        resetForm();
+    } else {
+        formData.append('name', name);
+        formData.append('grade', grade);
+
+        // Call burst enrollment API
+        response = await fetch('/api/enroll_burst', {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!response.ok) {
+            let detail = 'Error en registro por ráfaga';
+            try {
+                const errJson = await response.json();
+                detail = errJson.detail || detail;
+            } catch (_) {
+                try { detail = await response.text(); } catch (_) {}
+            }
+            console.error('[enroll_burst] status:', response.status, 'detail:', detail);
+            throw new Error(detail);
+        }
+
+        result = await response.json();
+
+        // Show success with captured image
+        if (result.photo_path) {
+            currentPreview = frames[0]; // Use first frame as preview
+            updatePreview(frames[0]);
+            embeddingState.textContent = '✅ Calculado';
+            showNotification(`✅ Registrado: ${result.name}`, 'success');
+        }
     }
 }
 

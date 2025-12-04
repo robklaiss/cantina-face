@@ -92,8 +92,11 @@ body {
 /* Main Container */
 #main-container {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: 1fr 1fr;
+    grid-template-columns: 1.4fr 1fr;
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+        "video student"
+        "sales student";
     height: calc(100vh - 70px);
     gap: var(--space-xl);
     padding: var(--space-xl);
@@ -106,6 +109,24 @@ body {
     padding: var(--space-xl);
     display: flex;
     flex-direction: column;
+}
+
+#video-zone {
+    grid-area: video;
+}
+
+#sales-left {
+    grid-area: sales;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-lg);
+}
+
+#student-column {
+    grid-area: student;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-lg);
 }
 
 #main-container h3 {
@@ -182,6 +203,7 @@ body {
 /* Student Zone */
 #student-zone {
     position: relative;
+    margin-bottom: var(--space-lg);
 }
 
 #student-quick-search {

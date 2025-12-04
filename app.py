@@ -569,20 +569,108 @@ async def attach_face_to_student(student_id: str, frame: UploadFile = File(...))
         session.add(student)
         session.commit()
 
-    # Update HNSW index entry (append new label and remap student id)
-    if index is not None:
-        current_count = index.get_current_count()
-        if current_count < MAX_ELEMENTS:
-            new_label = int(current_count)
-            index.add_items(final_embedding.reshape(1, -1), [new_label])
-            index_labels[student_id] = new_label
-            save_index()
+    # Rebuild HNSW index to mantener consistentes los labels y embeddings
+    # Esto evita que queden "vectores huérfanos" de alumnos antiguos al actualizar la cara.
+    rebuild_index()
 
     return {
         "success": True,
         "student_id": student_id,
         "photo_url": f"/data/faces/{photo_filename}",
     }
+
+@app.post("/api/students/{student_id}/attach-face-burst")
+async def attach_face_burst_to_student(
+    student_id: str,
+    frames: List[UploadFile] = File(...)
+):
+    if len(frames) < 3 or len(frames) > 5:
+        raise HTTPException(status_code=400, detail="Provide 3-5 frames")
+
+    try:
+        embeddings = []
+        best_frame = None
+        max_area = 0
+
+        for frame in frames:
+            contents = await frame.read()
+            nparr = np.frombuffer(contents, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img is None:
+                continue
+
+            bbox = face_engine.detect_face_bgr(img)
+            if bbox is None:
+                continue
+
+            area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+            if area > max_area:
+                max_area = area
+                best_frame = img
+
+            face = face_engine.crop_align(img, bbox)
+            if face is None:
+                continue
+
+            embedding = face_engine.embed(face)
+            if embedding is not None:
+                embeddings.append(embedding)
+
+        if len(embeddings) < 3:
+            raise HTTPException(status_code=400, detail="Could not detect faces in enough frames")
+
+        avg_embedding = face_engine.average_embeddings(embeddings)
+        if avg_embedding is None:
+            raise HTTPException(status_code=400, detail="Could not compute average embedding")
+
+        final_embedding = avg_embedding
+
+        with Session(engine) as session:
+            student = session.get(Student, student_id)
+            if not student:
+                raise HTTPException(status_code=404, detail="Student not found")
+
+            if student.embedding:
+                try:
+                    old_emb = np.frombuffer(student.embedding, dtype=np.float32)
+
+                    sim = face_engine.cosine_similarity(old_emb, avg_embedding)
+                    min_sim = SIM_THRESHOLD * 0.6
+
+                    if sim >= min_sim:
+                        alpha = 0.7
+                        combined = old_emb * alpha + avg_embedding * (1.0 - alpha)
+                        combined = combined / np.linalg.norm(combined)
+                        final_embedding = combined.astype(np.float32)
+                    else:
+                        final_embedding = old_emb
+                except Exception:
+                    final_embedding = avg_embedding
+
+            photo_filename = f"{student_id}_thumb.jpg"
+            photo_path = FACES_DIR / photo_filename
+
+            if best_frame is not None:
+                thumb = cv2.resize(best_frame, (120, 120), interpolation=cv2.INTER_LINEAR)
+                cv2.imwrite(str(photo_path), thumb)
+                student.photo_path = f"data/faces/{photo_filename}"
+
+            student.embedding = final_embedding.tobytes()
+            session.add(student)
+            session.commit()
+
+        rebuild_index()
+
+        return {
+            "success": True,
+            "student_id": student_id,
+            "photo_url": f"/data/faces/{photo_filename}" if best_frame is not None else "",
+            "frames_processed": len(embeddings),
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Attach face burst error: {str(e)}")
 
 @app.post("/api/recognize")
 async def recognize_face(file: UploadFile = File(...)):
