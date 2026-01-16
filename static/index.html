@@ -19,6 +19,7 @@
         </div>
         <div class="status-right">
             <span id="active-student-status">Cuenta: <span id="active-student-name">Ninguna</span></span>
+            <button id="toggle-recognition-btn" class="secondary-btn">Apagar reconocimiento</button>
             <button id="admin-btn" class="secondary-btn">⚙️ Administración</button>
         </div>
     </div>
@@ -36,46 +37,6 @@
                     📝 Registro Ágil
                 </button>
                 <button id="clear-btn" title="ESC">Limpiar</button>
-            </div>
-        </div>
-
-        <!-- Columna izquierda: productos rápidos + búsqueda + carrito -->
-        <div id="sales-left">
-            <!-- Zona 3: Botonera de Productos -->
-            <div id="products-zone" class="hidden">
-                <h3>Productos</h3>
-                <div id="products-grid">
-                    <button class="product-btn" data-product-id="1" title="1">1</button>
-                    <button class="product-btn" data-product-id="2" title="2">2</button>
-                    <button class="product-btn" data-product-id="3" title="3">3</button>
-                    <button class="product-btn" data-product-id="4" title="4">4</button>
-                    <button class="product-btn" data-product-id="5" title="5">5</button>
-                    <button class="product-btn" data-product-id="6" title="6">6</button>
-                    <button class="product-btn" data-product-id="7" title="7">7</button>
-                    <button class="product-btn" data-product-id="8" title="8">8</button>
-                    <button class="product-btn" data-product-id="9" title="9">9</button>
-                </div>
-
-                <div id="product-info">
-                    <h4>Carrito</h4>
-                    <div id="cart-items"></div>
-                    <p class="hidden"><strong>Seleccionado:</strong> <span id="selected-product">-</span></p>
-                    <p class="hidden"><strong>Precio:</strong> <span id="selected-price">0</span> <span id="currency">Gs.</span></p>
-                    <p class="cart-total-row"><strong>Total:</strong> <span id="cart-total">0</span> <span id="currency">Gs.</span></p>
-                    <div id="manual-charge" class="hidden">
-                        <button id="charge-btn" title="Enter">Cobrar Todo</button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Zona 4: Buscador Manual -->
-            <div id="search-zone" class="hidden">
-                <div id="search-header">
-                    <h3>Búsqueda Manual de Productos</h3>
-                    <button id="exit-sale-btn" class="secondary-btn close-btn">Cerrar</button>
-                </div>
-                <input type="text" id="search-input" placeholder="Buscar producto..." autocomplete="off" title="F2 para enfocar">
-                <div id="search-results"></div>
             </div>
         </div>
 

@@ -4,7 +4,15 @@ import numpy as np
 import onnxruntime as ort
 import urllib.request
 from pathlib import Path
-from config import INPUT_SIZE, FACE_MARGIN, MIN_FACE_SIZE
+from config import (
+    INPUT_SIZE,
+    FACE_MARGIN,
+    MIN_FACE_SIZE,
+    LOW_RES_WIDTH,
+    LOW_RES_HEIGHT,
+    HIGH_RES_WIDTH,
+    HIGH_RES_HEIGHT,
+)
 
 class FaceEngine:
     def __init__(self, model_path="models/arcface_r50.onnx"):
@@ -83,22 +91,76 @@ class FaceEngine:
         return image
 
     def detect_face_bgr(self, bgr):
-        """Detect face in BGR image and return bbox"""
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        """Detect face in BGR image (multi-scale) and return bbox in original coordinates"""
+        if bgr is None or bgr.size == 0:
+            return None
+
+        original_h, original_w = bgr.shape[:2]
+
+        # Normalize working resolution to keep recognition stable
+        working = bgr
+        scale_back_x = 1.0
+        scale_back_y = 1.0
+
+        if original_w > HIGH_RES_WIDTH or original_h > HIGH_RES_HEIGHT:
+            working = cv2.resize(bgr, (HIGH_RES_WIDTH, HIGH_RES_HEIGHT), interpolation=cv2.INTER_AREA)
+            scale_back_x = original_w / float(HIGH_RES_WIDTH)
+            scale_back_y = original_h / float(HIGH_RES_HEIGHT)
+
+        # Run detection on a low-resolution copy for speed
+        detection_frame = cv2.resize(working, (LOW_RES_WIDTH, LOW_RES_HEIGHT), interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2GRAY)
+
+        # Adjust minimum face size to the low-resolution space
+        min_size = (
+            max(int(MIN_FACE_SIZE[0] * LOW_RES_WIDTH / max(working.shape[1], 1)), 20),
+            max(int(MIN_FACE_SIZE[1] * LOW_RES_HEIGHT / max(working.shape[0], 1)), 20),
+        )
+
         faces = self.face_cascade.detectMultiScale(
             gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=MIN_FACE_SIZE,
-            maxSize=(300, 300)
+            scaleFactor=1.15,
+            minNeighbors=4,
+            minSize=min_size,
+            flags=cv2.CASCADE_SCALE_IMAGE
         )
 
         if len(faces) == 0:
             return None
 
-        # Return the largest detected face (by area) to focus on la cara principal
+        # Select face with largest area
         x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-        return (x, y, x + w, y + h)  # Return as (x1, y1, x2, y2)
+
+        # Re-scale from low-res detection space back to working image
+        scale_x = working.shape[1] / float(LOW_RES_WIDTH)
+        scale_y = working.shape[0] / float(LOW_RES_HEIGHT)
+
+        x1_resized = int(x * scale_x)
+        y1_resized = int(y * scale_y)
+        x2_resized = int((x + w) * scale_x)
+        y2_resized = int((y + h) * scale_y)
+
+        # Validate proportions before mapping back to original frame
+        width = x2_resized - x1_resized
+        height = y2_resized - y1_resized
+        if width <= 0 or height <= 0 or width / max(height, 1) > 3 or height / max(width, 1) > 3:
+            return None
+
+        x1 = int(x1_resized * scale_back_x)
+        y1 = int(y1_resized * scale_back_y)
+        x2 = int(x2_resized * scale_back_x)
+        y2 = int(y2_resized * scale_back_y)
+
+        # Clamp to frame bounds
+        x1 = max(0, min(x1, original_w - 1))
+        x2 = max(0, min(x2, original_w - 1))
+        y1 = max(0, min(y1, original_h - 1))
+        y2 = max(0, min(y2, original_h - 1))
+
+        if x2 - x1 < MIN_FACE_SIZE[0] or y2 - y1 < MIN_FACE_SIZE[1]:
+            return None
+
+        return (x1, y1, x2, y2)
 
     def crop_align(self, bgr, bbox):
         """Crop and align face from BGR image using bbox"""

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cantina Face - Ventas</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body class="sales-view">
+    <div id="status-bar">
+        <div class="status-left">
+            <span><strong>Vista:</strong> Ventas</span>
+            <span id="active-student-status">Cuenta: <span id="active-student-name">Ninguna</span></span>
+        </div>
+        <div class="status-right">
+            <a href="/" class="secondary-btn">⬅️ Volver a cámara</a>
+            <button id="sale-clear-btn" class="secondary-btn">Limpiar</button>
+        </div>
+    </div>
+
+    <div id="main-container" class="sales-layout">
+        <div id="sales-left">
+            <div id="search-zone">
+                <input type="text" id="search-input" placeholder="Buscar producto..." autocomplete="off" title="F2 para enfocar">
+                <div id="search-results"></div>
+            </div>
+
+            <div id="products-zone">
+                <div id="products-grid">
+                    <button class="product-btn" disabled>1</button>
+                    <button class="product-btn" disabled>2</button>
+                    <button class="product-btn" disabled>3</button>
+                    <button class="product-btn" disabled>4</button>
+                    <button class="product-btn" disabled>5</button>
+                    <button class="product-btn" disabled>6</button>
+                    <button class="product-btn" disabled>7</button>
+                    <button class="product-btn" disabled>8</button>
+                    <button class="product-btn" disabled>9</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="sales-right">
+            <div id="student-zone">
+                <div id="student-card" class="hidden">
+                    <img id="student-photo" src="/default-avatar.png" alt="Foto del alumno">
+                    <div id="student-details">
+                        <h4 id="student-name">-</h4>
+                        <p><strong>Grado:</strong> <span id="student-grade">-</span></p>
+                        <p><strong>Saldo:</strong> <span id="student-balance">0</span> <span id="currency">Gs.</span></p>
+                    </div>
+                </div>
+                <div id="no-student" class="center-text">
+                    Seleccioná un alumno para comenzar
+                </div>
+            </div>
+
+            <div id="product-info">
+                <h4>Carrito</h4>
+                <div id="cart-items"></div>
+                <p class="cart-total-row"><strong>Total:</strong> <span id="cart-total">0</span> <span id="currency">Gs.</span></p>
+                <div id="manual-charge" class="hidden">
+                    <button id="charge-btn" title="Enter">Cobrar Todo</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="notifications"></div>
+
+    <script src="/sales.js"></script>
+</body>
+</html>

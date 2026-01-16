@@ -1,6 +1,9 @@
-// Global variables
+// Global constants/state
+const FRAME_INTERVAL_MS = 500; // Keep in sync with backend config
+
 let videoStream = null;
 let recognitionInterval = null;
+let recognitionEnabled = true;
 let currentStudent = null;
 let selectedProduct = null;
 let products = [];
@@ -11,6 +14,7 @@ let lastFpsUpdate = Date.now();
 let frameCount = 0;
 let saleMode = false;
 let cart = [];
+let recognitionPausedByMode = false;
 
 // Helpers
 function formatGs(amount) {
@@ -19,6 +23,50 @@ function formatGs(amount) {
         return n.toLocaleString('es-PY', { maximumFractionDigits: 0 });
     } catch (_) {
         return n.toString();
+    }
+}
+
+function navigateToSalesView(studentId) {
+    if (!studentId) return;
+    pauseRecognitionForMode(false);
+    window.location.href = `/sales?student_id=${encodeURIComponent(studentId)}`;
+}
+
+function pauseRecognitionForMode(allowResume = true) {
+    if (!recognitionEnabled) {
+        recognitionPausedByMode = false;
+        return;
+    }
+    recognitionPausedByMode = allowResume;
+    recognitionEnabled = false;
+    stopRecognition();
+    stopCamera();
+    recognitionIndicator.textContent = '⛔';
+    recognitionIndicator.className = 'status-indicator warning';
+    cameraIndicator.textContent = '❌';
+    cameraIndicator.className = 'status-indicator error';
+    if (toggleRecognitionBtn) {
+        toggleRecognitionBtn.textContent = 'Encender reconocimiento';
+    }
+}
+
+async function resumeRecognitionAfterMode() {
+    if (!recognitionPausedByMode) {
+        return;
+    }
+    recognitionPausedByMode = false;
+    recognitionEnabled = true;
+    if (toggleRecognitionBtn) {
+        toggleRecognitionBtn.textContent = 'Apagar reconocimiento';
+    }
+    try {
+        await startCamera();
+        startRecognition();
+        recognitionIndicator.textContent = '⏳';
+        recognitionIndicator.className = 'status-indicator info';
+    } catch (error) {
+        console.error('Error resuming recognition:', error);
+        showNotification('No se pudo reactivar la cámara automáticamente', 'error');
     }
 }
 
@@ -99,8 +147,10 @@ const searchInput = document.getElementById('search-input');
 const searchResults = document.getElementById('search-results');
 const cartItems = document.getElementById('cart-items');
 const cartTotal = document.getElementById('cart-total');
+const productInfoPanel = document.getElementById('product-info');
 const quickSearchInput = document.getElementById('quick-search-input');
 const quickSearchResults = document.getElementById('quick-search-results');
+const studentQuickSearch = document.getElementById('student-quick-search');
 const enrollBtn = document.getElementById('enroll-btn');
 const clearBtn = document.getElementById('clear-btn');
 const chargeBtn = document.getElementById('charge-btn');
@@ -109,6 +159,22 @@ const productsZone = document.getElementById('products-zone');
 const searchZone = document.getElementById('search-zone');
 const activeStudentName = document.getElementById('active-student-name');
 const exitSaleBtn = document.getElementById('exit-sale-btn');
+const toggleRecognitionBtn = document.getElementById('toggle-recognition-btn');
+const adminBtn = document.getElementById('admin-btn');
+const statusRight = document.querySelector('#status-bar .status-right');
+let saleCloseBtn = null;
+
+function ensureSaleCloseButton() {
+    if (saleCloseBtn || !statusRight) return saleCloseBtn;
+    saleCloseBtn = document.createElement('button');
+    saleCloseBtn.id = 'sale-close-btn';
+    saleCloseBtn.className = 'secondary-btn';
+    saleCloseBtn.textContent = '✖️ Cerrar';
+    saleCloseBtn.style.display = 'none';
+    saleCloseBtn.addEventListener('click', () => clearBtn.click());
+    statusRight.insertBefore(saleCloseBtn, toggleRecognitionBtn || null);
+    return saleCloseBtn;
+}
 
 // Initialize application
 async function init() {
@@ -167,6 +233,9 @@ async function loadProducts() {
 async function startCamera() {
     console.log('📷 startCamera() called - requesting camera permission...');
     try {
+        if (videoStream) {
+            return;
+        }
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             console.error('Camera API not supported in this browser context.');
             throw new Error('Camera API not supported');
@@ -183,6 +252,9 @@ async function startCamera() {
 
         console.log('✅ Camera stream obtained');
         video.srcObject = videoStream;
+        if (video.play) {
+            await video.play().catch(() => {});
+        }
         cameraIndicator.textContent = '✅';
         cameraIndicator.className = 'status-indicator success';
         console.log('📷 Camera initialized successfully');
@@ -194,14 +266,44 @@ async function startCamera() {
     }
 }
 
+function stopCamera() {
+    console.log('📷 stopCamera()');
+    if (videoStream) {
+        videoStream.getTracks().forEach(track => track.stop());
+        videoStream = null;
+    }
+    if (video) {
+        if (video.pause) {
+            video.pause();
+        }
+        video.srcObject = null;
+    }
+    cameraIndicator.textContent = '❌';
+    cameraIndicator.className = 'status-indicator error';
+    console.log('📷 Camera stopped');
+}
+
 // Start face recognition loop
 function startRecognition() {
     if (recognitionInterval) {
         clearInterval(recognitionInterval);
     }
 
+    if (!recognitionEnabled) {
+        return;
+    }
+
+    lastFpsUpdate = Date.now();
+    frameCount = 0;
+    recognitionIndicator.textContent = '⏳';
+    recognitionIndicator.className = 'status-indicator info';
+
     recognitionInterval = setInterval(async () => {
         if (!videoStream) return;
+        if (!recognitionEnabled) {
+            stopRecognition();
+            return;
+        }
 
         try {
             const canvas = document.createElement('canvas');
@@ -236,7 +338,23 @@ function startRecognition() {
             console.error('Recognition error:', error);
             recognitionIndicator.textContent = '❌';
         }
-    }, 200); // FRAME_INTERVAL_MS (~5 FPS)
+    }, FRAME_INTERVAL_MS);
+}
+
+function stopRecognition() {
+    if (recognitionInterval) {
+        clearInterval(recognitionInterval);
+        recognitionInterval = null;
+    }
+
+    frameCount = 0;
+    recognitionIndicator.textContent = '⏹';
+    recognitionIndicator.className = 'status-indicator';
+
+    const faceBbox = document.getElementById('face-bbox');
+    if (faceBbox) {
+        faceBbox.style.display = 'none';
+    }
 }
 
 // Update recognition result
@@ -342,7 +460,13 @@ function hideStudentCard() {
 
 // Enter sale mode (show products and search)
 function enterSaleMode() {
+    if (!productsZone || !searchZone) {
+        return;
+    }
+
     saleMode = true;
+
+    pauseRecognitionForMode();
 
     if (productsZone) {
         productsZone.classList.remove('hidden');
@@ -354,6 +478,27 @@ function enterSaleMode() {
 
     if (videoZone) {
         videoZone.classList.add('hidden');
+    }
+
+    if (studentQuickSearch) {
+        studentQuickSearch.classList.add('hidden');
+    }
+
+    if (productInfoPanel) {
+        productInfoPanel.classList.remove('hidden');
+    }
+
+    if (toggleRecognitionBtn) {
+        toggleRecognitionBtn.style.display = 'none';
+    }
+
+    if (adminBtn) {
+        adminBtn.style.display = 'none';
+    }
+
+    const closeBtn = ensureSaleCloseButton();
+    if (closeBtn) {
+        closeBtn.style.display = 'inline-flex';
     }
 
     if (searchInput) {
@@ -388,13 +533,15 @@ function renderCart() {
 
         const row = document.createElement('div');
         row.className = 'cart-item';
+        const minusLabel = item.quantity > 1 ? '-' : '🗑️';
+        const minusTitle = item.quantity > 1 ? 'Restar uno' : 'Eliminar producto';
         row.innerHTML = `
             <span class="cart-name">${product.name}</span>
             <div class="cart-qty">
-                ${item.quantity > 1 ? '<button class="qty-btn minus">-</button>' : ''}
-                <span class="qty">${item.quantity}</span>
-                <button class="qty-btn plus">+</button>
                 <span class="cart-subtotal">${formatGs(subtotal)} Gs.</span>
+                <button class="qty-btn minus" title="${minusTitle}">${minusLabel}</button>
+                <span class="qty">${item.quantity}</span>
+                <button class="qty-btn plus" title="Sumar uno">+</button>
             </div>
         `;
 
@@ -632,14 +779,7 @@ function displaySearchResults(students) {
         `;
 
         div.addEventListener('click', () => {
-            manualStudentSelection = true; // Mark as manual selection
-            currentStudent = student;
-            showStudentCard(student);
-            searchInput.value = '';
-            searchResults.innerHTML = '';
-
-            // Focus back on search input for next search
-            setTimeout(() => searchInput.focus(), 100);
+            navigateToSalesView(student.id);
         });
 
         // Keyboard navigation
@@ -680,13 +820,7 @@ function displayQuickSearchResults(students) {
             </div>
         `;
 
-        div.addEventListener('click', () => {
-            manualStudentSelection = true;
-            currentStudent = student;
-            showStudentCard(student);
-            quickSearchInput.value = '';
-            quickSearchResults.innerHTML = '';
-        });
+        div.addEventListener('click', () => navigateToSalesView(student.id));
 
         quickSearchResults.appendChild(div);
     });
@@ -699,8 +833,7 @@ function setupEventListeners() {
         studentCard.style.cursor = 'pointer';
         studentCard.addEventListener('click', () => {
             if (!currentStudent) return;
-            manualStudentSelection = true;
-            enterSaleMode();
+            navigateToSalesView(currentStudent.id);
         });
     }
 
@@ -713,8 +846,7 @@ function setupEventListeners() {
             if (quickSearchInput && quickSearchInput.contains(e.target)) return;
             if (quickSearchResults && quickSearchResults.contains(e.target)) return;
 
-            manualStudentSelection = true;
-            enterSaleMode();
+            navigateToSalesView(currentStudent.id);
         });
     }
 
@@ -732,11 +864,13 @@ function setupEventListeners() {
     });
 
     // Search input (manual search)
-    searchInput.addEventListener('input', (e) => {
-        clearTimeout(searchTimeout);
-        const value = e.target.value;
-        searchTimeout = setTimeout(() => searchProducts(value), 150);
-    });
+    if (searchInput) {
+        searchInput.addEventListener('input', (e) => {
+            clearTimeout(searchTimeout);
+            const value = e.target.value;
+            searchTimeout = setTimeout(() => searchProducts(value), 150);
+        });
+    }
 
     // Quick search input (top of student zone)
     if (quickSearchInput) {
@@ -747,7 +881,9 @@ function setupEventListeners() {
     }
 
     // Charge button
-    chargeBtn.addEventListener('click', chargeCart);
+    if (chargeBtn) {
+        chargeBtn.addEventListener('click', chargeCart);
+    }
 
     // Exit sale button (Cerrar)
     if (exitSaleBtn) {
@@ -765,6 +901,8 @@ function setupEventListeners() {
         productButtons.forEach(btn => btn.classList.remove('selected'));
         saleMode = false;
 
+        resumeRecognitionAfterMode();
+
         if (productsZone) {
             productsZone.classList.add('hidden');
         }
@@ -777,21 +915,65 @@ function setupEventListeners() {
             videoZone.classList.remove('hidden');
         }
 
+        if (studentQuickSearch) {
+            studentQuickSearch.classList.remove('hidden');
+        }
+
+        if (productInfoPanel) {
+            productInfoPanel.classList.add('hidden');
+        }
+
+        if (toggleRecognitionBtn) {
+            toggleRecognitionBtn.style.display = '';
+        }
+
+        if (adminBtn) {
+            adminBtn.style.display = '';
+        }
+
+        if (saleCloseBtn) {
+            saleCloseBtn.style.display = 'none';
+        }
+
         if (activeStudentName) {
             activeStudentName.textContent = 'Ninguna';
         }
     });
 
     // Enroll button
-    enrollBtn.addEventListener('click', () => {
-        window.location.href = '/enroll.html';
-    });
+    if (enrollBtn) {
+        enrollBtn.addEventListener('click', () => {
+            window.location.href = '/enroll.html';
+        });
+    }
 
-    // Admin button
-    const adminBtn = document.getElementById('admin-btn');
     if (adminBtn) {
         adminBtn.addEventListener('click', () => {
+            pauseRecognitionForMode(false);
             window.location.href = '/admin.html';
+        });
+    }
+
+    // Recognition toggle button
+    if (toggleRecognitionBtn) {
+        toggleRecognitionBtn.addEventListener('click', async () => {
+            recognitionEnabled = !recognitionEnabled;
+
+            if (recognitionEnabled) {
+                toggleRecognitionBtn.textContent = 'Apagar reconocimiento';
+                await startCamera();
+                startRecognition();
+                showNotification('Reconocimiento facial activado', 'info');
+            } else {
+                toggleRecognitionBtn.textContent = 'Encender reconocimiento';
+                stopRecognition();
+                stopCamera();
+                recognitionIndicator.textContent = '⛔';
+                recognitionIndicator.className = 'status-indicator warning';
+                cameraIndicator.textContent = '❌';
+                cameraIndicator.className = 'status-indicator error';
+                showNotification('Reconocimiento facial desactivado', 'warning');
+            }
         });
     }
 
@@ -821,12 +1003,12 @@ function setupEventListeners() {
         // F2 for search focus
         if (e.key === 'F2') {
             e.preventDefault();
-            if (!saleMode) {
+            if (!saleMode && productsZone && searchZone) {
                 enterSaleMode();
             }
 
-            if (searchInput) {
-                searchInput.focus();
+            if (productsZone && searchInput) {
+                setTimeout(() => searchInput.focus(), 50);
             }
             return;
         }

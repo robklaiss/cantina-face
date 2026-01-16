@@ -3,25 +3,75 @@ import json
 import base64
 import shutil
 from pathlib import Path
-from typing import List, Optional
-from datetime import datetime
-from uuid import uuid4
+from typing import List, Optional, Dict, Set, Tuple
+from datetime import datetime, timedelta
+from enum import Enum
 
 import cv2
 import numpy as np
 import hnswlib
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Depends, status
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlmodel import SQLModel, Field, Session, create_engine, select
 from PIL import Image
 import uvicorn
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 
 from face_engine import FaceEngine
 from config import SIM_THRESHOLD, FRAME_INTERVAL_MS, SEARCH_LIMIT, CURRENCY, MAX_ELEMENTS, EF_CONSTRUCTION, M_INDEX
 
+
+class Role(str, Enum):
+    ADMIN = "admin"
+    CAJERA = "cajera"
+    STOCK = "stock"
+    PARENT = "parent"
+
+
+class AllergyType(str, Enum):
+    MANI = "mani"
+    FRUTOS_SECOS = "frutos_secos"
+    LECHE = "leche"
+    LACTOSA = "lactosa"
+    HUEVO = "huevo"
+    TRIGO = "trigo"
+    SOJA = "soja"
+    PESCADO = "pescado"
+    MARISCOS = "mariscos"
+    SESAMO = "sesamo"
+    GLUTEN = "gluten"
+    FRUCTOSA = "fructosa"
+    COLORANTES = "colorantes"
+    DIABETES = "diabetes"
+    VEGETARIANO = "vegetariano"
+    VEGANO = "vegano"
+
+
+class RestrictionMode(str, Enum):
+    ALLOW_ONLY = "allow_only"
+    BLOCK_LIST = "block_list"
+
+
 # Database models
+class PointOfSale(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    location: Optional[str] = None
+
+
+class User(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    email: str = Field(index=True, unique=True)
+    full_name: Optional[str] = None
+    role: Role = Field(default=Role.CAJERA)
+    hashed_password: str
+    point_of_sale_id: Optional[int] = Field(default=None, foreign_key="pointofsale.id")
+
+
 class Student(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     name: str
@@ -29,12 +79,26 @@ class Student(SQLModel, table=True):
     balance: int = Field(default=0)
     photo_path: str = ""
     embedding: Optional[bytes] = None
+    point_of_sale_id: Optional[int] = Field(default=None, foreign_key="pointofsale.id")
+
 
 class Product(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     price: int
     stock: int = Field(default=0)
+    default_min_stock: int = Field(default=20)
+    allergens: Optional[str] = None
+
+
+class ProductStock(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    product_id: int = Field(foreign_key="product.id")
+    point_of_sale_id: int = Field(foreign_key="pointofsale.id")
+    current_stock: int = Field(default=0)
+    min_stock: int = Field(default=20)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
 
 class Transaction(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -42,6 +106,30 @@ class Transaction(SQLModel, table=True):
     product_id: int
     amount: int
     created_at: datetime = Field(default_factory=datetime.now)
+    payment_method: str = Field(default="balance")
+    point_of_sale_id: Optional[int] = Field(default=None, foreign_key="pointofsale.id")
+    cashier_id: Optional[int] = Field(default=None, foreign_key="user.id")
+    quantity: int = Field(default=1)
+
+
+class StudentGuardian(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    student_id: str = Field(foreign_key="student.id")
+    parent_user_id: int = Field(foreign_key="user.id")
+
+
+class StudentAllergy(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    student_id: str = Field(foreign_key="student.id")
+    allergy: AllergyType
+    notes: Optional[str] = None
+
+
+class StudentProductRule(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    student_id: str = Field(foreign_key="student.id")
+    product_id: int = Field(foreign_key="product.id")
+    mode: RestrictionMode = Field(default=RestrictionMode.BLOCK_LIST)
 
 # Pydantic models for API
 class StudentCreate(BaseModel):
@@ -60,11 +148,13 @@ class ProductCreate(BaseModel):
     name: str
     price: int
     stock: int = 0
+    allergens: List[AllergyType] = []
 
 class ProductUpdate(BaseModel):
     name: str
     price: int
     stock: int
+    allergens: List[AllergyType] = []
 
 class RecognitionResult(BaseModel):
     match: bool
@@ -74,10 +164,90 @@ class RecognitionResult(BaseModel):
 class ChargeRequest(BaseModel):
     student_id: str
     product_id: int
+    quantity: int = 1
+    payment_method: str = "balance"
+    point_of_sale_id: Optional[int] = None
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class TokenData(BaseModel):
+    email: Optional[str] = None
+    role: Optional[Role] = None
+
+
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    full_name: Optional[str] = None
+    role: Role = Role.CAJERA
+    point_of_sale_id: Optional[int] = None
+
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    full_name: Optional[str]
+    role: Role
+    point_of_sale_id: Optional[int]
+
+
+class PointOfSaleCreate(BaseModel):
+    name: str
+    location: Optional[str] = None
+
+
+class PointOfSaleResponse(BaseModel):
+    id: int
+    name: str
+    location: Optional[str]
+
+
+class ProductStockCreate(BaseModel):
+    product_id: int
+    point_of_sale_id: int
+    current_stock: int = 0
+    min_stock: Optional[int] = None
+
+
+class ProductStockUpdate(BaseModel):
+    current_stock: Optional[int] = None
+    min_stock: Optional[int] = None
+
+
+class ProductStockResponse(BaseModel):
+    id: int
+    product_id: int
+    product_name: str
+    point_of_sale_id: int
+    current_stock: int
+    min_stock: int
+    updated_at: datetime
+
+
+class StudentAllergyRequest(BaseModel):
+    allergies: List[AllergyType] = []
+    notes: Optional[str] = None
+
+
+class StudentProductRulesRequest(BaseModel):
+    allow_product_ids: List[int] = []
+    block_product_ids: List[int] = []
 
 # Global variables
 app = FastAPI(title="Cantina Face Recognition System")
 face_engine = FaceEngine()
+
+# Security / auth settings
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me-super-secret")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "120"))
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
 # Base directories (absolute paths)
 BASE_DIR = Path(__file__).resolve().parent
@@ -97,15 +267,105 @@ engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
 SQLModel.metadata.create_all(engine)
 
 
-def ensure_product_stock_column():
-    """Ensure 'stock' column exists on Product table (SQLite migrations)."""
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except ValueError:
+        return False
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_user_by_email(session: Session, email: str) -> Optional[User]:
+    return session.exec(select(User).where(User.email == email)).first()
+
+
+def authenticate_user(session: Session, email: str, password: str) -> Optional[User]:
+    user = get_user_by_email(session, email)
+    if not user:
+        return None
+    if not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        role: str = payload.get("role")
+        if email is None:
+            raise credentials_exception
+        token_data = TokenData(email=email, role=Role(role) if role else None)
+    except (JWTError, ValueError):
+        raise credentials_exception
+
+    with Session(engine) as session:
+        user = get_user_by_email(session, token_data.email)
+        if user is None:
+            raise credentials_exception
+        return user
+
+
+def require_roles(*roles: Role):
+    async def _dependency(current_user: User = Depends(get_current_user)) -> User:
+        if roles and current_user.role not in roles:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+        return current_user
+
+    return _dependency
+
+
+def ensure_default_admin():
+    admin_email = os.getenv("ADMIN_EMAIL")
+    admin_password = os.getenv("ADMIN_PASSWORD")
+    if not admin_email or not admin_password:
+        return
+
+    with Session(engine) as session:
+        if get_user_by_email(session, admin_email):
+            return
+
+        admin_user = User(
+            email=admin_email,
+            full_name="Administrador",
+            role=Role.ADMIN,
+            hashed_password=get_password_hash(admin_password),
+        )
+        session.add(admin_user)
+        session.commit()
+
+
+def ensure_column(table_name: str, column_name: str, column_type: str):
+    table_quoted = f'"{table_name}"'
     with engine.connect() as conn:
-        result = conn.exec_driver_sql("PRAGMA table_info(product)").all()
-        # row[1] is column name
-        if not any(row[1] == "stock" for row in result):
+        result = conn.exec_driver_sql(f"PRAGMA table_info({table_quoted})").all()
+        if not any(row[1] == column_name for row in result):
             conn.exec_driver_sql(
-                "ALTER TABLE product ADD COLUMN stock INTEGER NOT NULL DEFAULT 0"
+                f"ALTER TABLE {table_quoted} ADD COLUMN {column_name} {column_type}"
             )
+
+
+def ensure_product_stock_column():
+    """Ensure legacy columns exist on Product table (SQLite migrations)."""
+    ensure_column("product", "stock", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column("product", "default_min_stock", "INTEGER NOT NULL DEFAULT 20")
+    ensure_column("product", "allergens", "TEXT")
 
 
 # HNSW index settings
@@ -201,7 +461,13 @@ def search_similar(embedding, k=1):
 async def startup_event():
     """Initialize components on startup"""
     ensure_product_stock_column()
+    ensure_column("student", "point_of_sale_id", "INTEGER")
+    ensure_column("transaction", "payment_method", "TEXT DEFAULT 'balance'")
+    ensure_column("transaction", "point_of_sale_id", "INTEGER")
+    ensure_column("transaction", "cashier_id", "INTEGER")
+    ensure_column("transaction", "quantity", "INTEGER NOT NULL DEFAULT 1")
     init_hnsw_index()
+    ensure_default_admin()
 
     # Rebuild index if empty but we have students in DB
     with Session(engine) as session:
@@ -210,8 +476,250 @@ async def startup_event():
     if index.get_current_count() == 0 and len(student_count) > 0:
         rebuild_index()
 
+
+def get_or_create_product_stock(session: Session, product_id: int, point_of_sale_id: int) -> ProductStock:
+    stock = session.exec(
+        select(ProductStock).where(
+            ProductStock.product_id == product_id,
+            ProductStock.point_of_sale_id == point_of_sale_id,
+        )
+    ).first()
+
+    if stock:
+        return stock
+
+    product = session.get(Product, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    stock = ProductStock(
+        product_id=product_id,
+        point_of_sale_id=point_of_sale_id,
+        current_stock=product.stock,
+        min_stock=product.default_min_stock,
+    )
+    session.add(stock)
+    session.commit()
+    session.refresh(stock)
+    return stock
+
+
+def serialize_product_stock(stock: ProductStock, product_name: str) -> ProductStockResponse:
+    return ProductStockResponse(
+        id=stock.id,
+        product_id=stock.product_id,
+        product_name=product_name,
+        point_of_sale_id=stock.point_of_sale_id,
+        current_stock=stock.current_stock,
+        min_stock=stock.min_stock,
+        updated_at=stock.updated_at,
+    )
+
+
+def parse_product_allergens(product: Product) -> List[AllergyType]:
+    if not product.allergens:
+        return []
+    try:
+        data = json.loads(product.allergens)
+        normalized = []
+        for item in data:
+            try:
+                normalized.append(AllergyType(item))
+            except ValueError:
+                continue
+        return normalized
+    except Exception:
+        return []
+
+
+def serialize_product(product: Product) -> Dict[str, Optional[str]]:
+    allergens = [a.value if isinstance(a, AllergyType) else a for a in parse_product_allergens(product)]
+    return {
+        "id": product.id,
+        "name": product.name,
+        "price": product.price,
+        "stock": product.stock,
+        "allergens": allergens,
+    }
+
+
+def is_student_guardian(session: Session, parent_id: int, student_id: str) -> bool:
+    return session.exec(
+        select(StudentGuardian).where(
+            StudentGuardian.student_id == student_id,
+            StudentGuardian.parent_user_id == parent_id,
+        )
+    ).first() is not None
+
+
+def ensure_student_access(session: Session, current_user: User, student_id: str):
+    if current_user.role == Role.ADMIN:
+        return
+    if current_user.role == Role.PARENT and is_student_guardian(session, current_user.id, student_id):
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this student")
+
+
+def get_student_restrictions(session: Session, student_id: str) -> Tuple[Set[AllergyType], Set[int], Set[int]]:
+    allergies = {
+        entry.allergy
+        for entry in session.exec(select(StudentAllergy).where(StudentAllergy.student_id == student_id)).all()
+    }
+
+    rules = session.exec(select(StudentProductRule).where(StudentProductRule.student_id == student_id)).all()
+    allow = {rule.product_id for rule in rules if rule.mode == RestrictionMode.ALLOW_ONLY}
+    block = {rule.product_id for rule in rules if rule.mode == RestrictionMode.BLOCK_LIST}
+    return allergies, allow, block
+
+
+def check_product_restrictions(
+    product: Product,
+    allergies: Set[AllergyType],
+    allow: Set[int],
+    block: Set[int]
+) -> Tuple[bool, Optional[str]]:
+    product_allergens = parse_product_allergens(product)
+    for allergen in product_allergens:
+        if allergen in allergies:
+            return False, f"Producto restringido por alergia: {allergen.value}"
+
+    if allow and product.id not in allow:
+        return False, "Producto no autorizado para este alumno"
+
+    if product.id in block:
+        return False, "Producto bloqueado por los padres"
+
+    return True, None
+
+
+@app.post("/auth/token", response_model=Token)
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    with Session(engine) as session:
+        user = authenticate_user(session, form_data.username, form_data.password)
+        if not user:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect email or password")
+
+        access_token = create_access_token({"sub": user.email, "role": user.role.value})
+        return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.post("/auth/users", response_model=UserResponse)
+async def create_user(user_in: UserCreate, current_user: User = Depends(require_roles(Role.ADMIN))):
+    with Session(engine) as session:
+        if get_user_by_email(session, user_in.email):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
+
+        user = User(
+            email=user_in.email,
+            full_name=user_in.full_name,
+            role=user_in.role,
+            point_of_sale_id=user_in.point_of_sale_id,
+            hashed_password=get_password_hash(user_in.password),
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+
+        return UserResponse(
+            id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            role=user.role,
+            point_of_sale_id=user.point_of_sale_id,
+        )
+
+
+@app.get("/auth/me", response_model=UserResponse)
+async def read_current_user(current_user: User = Depends(get_current_user)):
+    return UserResponse(
+        id=current_user.id,
+        email=current_user.email,
+        full_name=current_user.full_name,
+        role=current_user.role,
+        point_of_sale_id=current_user.point_of_sale_id,
+    )
+
+
+@app.post("/api/points-of-sale", response_model=PointOfSaleResponse)
+async def create_point_of_sale(
+    payload: PointOfSaleCreate,
+    current_user: User = Depends(require_roles(Role.ADMIN))
+):
+    with Session(engine) as session:
+        pos = PointOfSale(name=payload.name, location=payload.location)
+        session.add(pos)
+        session.commit()
+        session.refresh(pos)
+        return PointOfSaleResponse(id=pos.id, name=pos.name, location=pos.location)
+
+
+@app.get("/api/points-of-sale", response_model=List[PointOfSaleResponse])
+async def list_points_of_sale(current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK))):
+    with Session(engine) as session:
+        points = session.exec(select(PointOfSale)).all()
+        return [PointOfSaleResponse(id=p.id, name=p.name, location=p.location) for p in points]
+
+
+@app.post("/api/stock", response_model=ProductStockResponse)
+async def create_product_stock(
+    payload: ProductStockCreate,
+    current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK))
+):
+    with Session(engine) as session:
+        product = session.get(Product, payload.product_id)
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        stock = ProductStock(
+            product_id=payload.product_id,
+            point_of_sale_id=payload.point_of_sale_id,
+            current_stock=payload.current_stock,
+            min_stock=payload.min_stock or product.default_min_stock,
+        )
+        session.add(stock)
+        session.commit()
+        session.refresh(stock)
+        return serialize_product_stock(stock, product.name)
+
+
+@app.get("/api/stock/{point_of_sale_id}", response_model=List[ProductStockResponse])
+async def list_stock_by_pos(point_of_sale_id: int, current_user: User = Depends(get_current_user)):
+    with Session(engine) as session:
+        query = (
+            select(ProductStock, Product)
+            .join(Product, Product.id == ProductStock.product_id)
+            .where(ProductStock.point_of_sale_id == point_of_sale_id)
+        )
+        rows = session.exec(query).all()
+        return [serialize_product_stock(stock, prod.name) for stock, prod in rows]
+
+
+@app.patch("/api/stock/{stock_id}", response_model=ProductStockResponse)
+async def update_product_stock(
+    stock_id: int,
+    payload: ProductStockUpdate,
+    current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK))
+):
+    with Session(engine) as session:
+        stock = session.get(ProductStock, stock_id)
+        if not stock:
+            raise HTTPException(status_code=404, detail="Stock record not found")
+
+        if payload.current_stock is not None:
+            stock.current_stock = payload.current_stock
+        if payload.min_stock is not None:
+            stock.min_stock = payload.min_stock
+        stock.updated_at = datetime.utcnow()
+        session.add(stock)
+        session.commit()
+        session.refresh(stock)
+
+        product = session.get(Product, stock.product_id)
+        product_name = product.name if product else "Producto"
+        return serialize_product_stock(stock, product_name)
+
 @app.post("/api/products")
-async def create_product(product: ProductCreate):
+async def create_product(product: ProductCreate, current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK))):
     """Create a new product"""
     with Session(engine) as session:
         # Check if product with same name already exists
@@ -227,6 +735,7 @@ async def create_product(product: ProductCreate):
             name=product.name,
             price=product.price,
             stock=product.stock,
+            allergens=json.dumps([a.value for a in product.allergens]) if product.allergens else None,
         )
         
         session.add(new_product)
@@ -256,8 +765,193 @@ async def list_products():
             for p in products
         ]
 
+
+@app.get("/api/parents/students", response_model=List[StudentResponse])
+async def list_parent_students(current_user: User = Depends(require_roles(Role.PARENT))):
+    with Session(engine) as session:
+        guardian_links = session.exec(
+            select(StudentGuardian).where(StudentGuardian.parent_user_id == current_user.id)
+        ).all()
+
+        student_ids = [link.student_id for link in guardian_links]
+        if not student_ids:
+            return []
+
+        students = session.exec(select(Student).where(Student.id.in_(student_ids))).all()
+        return [
+            StudentResponse(
+                id=s.id,
+                name=s.name,
+                grade=s.grade,
+                balance=s.balance,
+                photo_path=f"/data/faces/{Path(s.photo_path).name}" if s.photo_path else '/default-avatar.png'
+            )
+            for s in students
+        ]
+
+
+@app.get("/api/students/{student_id}/allergies")
+async def get_student_allergies(student_id: str, current_user: User = Depends(get_current_user)):
+    with Session(engine) as session:
+        student = session.get(Student, student_id)
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        ensure_student_access(session, current_user, student_id)
+
+        entries = session.exec(select(StudentAllergy).where(StudentAllergy.student_id == student_id)).all()
+        return {
+            "student_id": student_id,
+            "allergies": [entry.allergy.value for entry in entries],
+            "notes": entries[0].notes if entries else None,
+        }
+
+
+@app.put("/api/students/{student_id}/allergies")
+async def update_student_allergies(
+    student_id: str,
+    payload: StudentAllergyRequest,
+    current_user: User = Depends(get_current_user)
+):
+    with Session(engine) as session:
+        student = session.get(Student, student_id)
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        ensure_student_access(session, current_user, student_id)
+
+        existing = session.exec(select(StudentAllergy).where(StudentAllergy.student_id == student_id)).all()
+        for entry in existing:
+            session.delete(entry)
+
+        for allergy in payload.allergies:
+            session.add(StudentAllergy(student_id=student_id, allergy=allergy, notes=payload.notes))
+
+        session.commit()
+
+        return {
+            "student_id": student_id,
+            "allergies": [a.value for a in payload.allergies],
+            "notes": payload.notes,
+        }
+
+
+@app.put("/api/students/{student_id}/product-rules")
+async def update_student_product_rules(
+    student_id: str,
+    payload: StudentProductRulesRequest,
+    current_user: User = Depends(get_current_user)
+):
+    with Session(engine) as session:
+        student = session.get(Student, student_id)
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        ensure_student_access(session, current_user, student_id)
+
+        existing = session.exec(select(StudentProductRule).where(StudentProductRule.student_id == student_id)).all()
+        for entry in existing:
+            session.delete(entry)
+
+        product_ids = set(payload.allow_product_ids + payload.block_product_ids)
+        if product_ids:
+            valid_ids = {
+                prod.id
+                for prod in session.exec(select(Product).where(Product.id.in_(product_ids))).all()
+            }
+        else:
+            valid_ids = set()
+
+        for product_id in payload.allow_product_ids:
+            if product_id in valid_ids or not valid_ids:
+                session.add(
+                    StudentProductRule(
+                        student_id=student_id,
+                        product_id=product_id,
+                        mode=RestrictionMode.ALLOW_ONLY,
+                    )
+                )
+
+        for product_id in payload.block_product_ids:
+            if product_id in valid_ids or not valid_ids:
+                session.add(
+                    StudentProductRule(
+                        student_id=student_id,
+                        product_id=product_id,
+                        mode=RestrictionMode.BLOCK_LIST,
+                    )
+                )
+
+        session.commit()
+
+        return {
+            "student_id": student_id,
+            "allow_product_ids": payload.allow_product_ids,
+            "block_product_ids": payload.block_product_ids,
+        }
+
+
+@app.get("/api/students/{student_id}/catalog")
+async def get_student_catalog(
+    student_id: str,
+    point_of_sale_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user)
+):
+    with Session(engine) as session:
+        student = session.get(Student, student_id)
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        ensure_student_access(session, current_user, student_id)
+
+        allergies, allow, block = get_student_restrictions(session, student_id)
+
+        products_query = select(Product)
+        products = session.exec(products_query).all()
+
+        stock_map: Dict[int, int] = {}
+        if point_of_sale_id:
+            stock_rows = session.exec(
+                select(ProductStock).where(ProductStock.point_of_sale_id == point_of_sale_id)
+            ).all()
+            stock_map = {row.product_id: row.current_stock for row in stock_rows}
+
+        catalog = []
+        for product in products:
+            allowed, reason = check_product_restrictions(product, allergies, allow, block)
+            item = serialize_product(product)
+            item.update(
+                {
+                    "allowed": allowed,
+                    "restriction_reason": reason,
+                    "stock_at_pos": stock_map.get(product.id) if point_of_sale_id else None,
+                }
+            )
+            catalog.append(item)
+
+        return {
+            "student_id": student_id,
+            "catalog": catalog,
+        }
+
+
+@app.get("/api/students/{student_id}")
+async def get_student_detail(student_id: str):
+    with Session(engine) as session:
+        student = session.get(Student, student_id)
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        return {
+            "id": student.id,
+            "name": student.name,
+            "grade": student.grade,
+            "balance": student.balance,
+            "photo_url": f"/data/faces/{Path(student.photo_path).name}" if student.photo_path else '/default-avatar.png'
+        }
+
 @app.put("/api/products/{product_id}")
-async def update_product(product_id: int, product: ProductUpdate):
+async def update_product(product_id: int, product: ProductUpdate, current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK))):
     """Update an existing product (name, price, stock)."""
     with Session(engine) as session:
         db_product = session.get(Product, product_id)
@@ -267,6 +961,7 @@ async def update_product(product_id: int, product: ProductUpdate):
         db_product.name = product.name
         db_product.price = product.price
         db_product.stock = product.stock
+        db_product.allergens = json.dumps([a.value for a in product.allergens]) if product.allergens else None
         session.add(db_product)
         session.commit()
         session.refresh(db_product)
@@ -279,7 +974,7 @@ async def update_product(product_id: int, product: ProductUpdate):
         }
 
 @app.post("/api/seed")
-async def seed_products():
+async def seed_products(current_user: User = Depends(require_roles(Role.ADMIN))):
     """Seed demo products with IDs 1-9"""
     demo_products = [
         {"id": 1, "name": "Sandwich", "price": 350, "stock": 999},
@@ -997,7 +1692,10 @@ async def delete_student(student_id: str):
         return {"success": True, "message": "Student deleted successfully"}
 
 @app.post("/api/charge")
-async def charge_student(charge: ChargeRequest):
+async def charge_student(
+    charge: ChargeRequest,
+    current_user: User = Depends(require_roles(Role.ADMIN, Role.CAJERA))
+):
     """Charge a product to a student's account"""
     with Session(engine) as session:
         # Get student
@@ -1010,40 +1708,64 @@ async def charge_student(charge: ChargeRequest):
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
 
-        # Check stock if managed
-        if hasattr(product, "stock") and product.stock is not None and product.stock <= 0:
-            raise HTTPException(status_code=400, detail="Product out of stock")
+        quantity = max(1, charge.quantity)
+        total_amount = product.price * quantity
 
-        # Check balance (convert to cents for comparison)
-        if student.balance < product.price:
-            raise HTTPException(status_code=400, detail="Insufficient balance")
-        
-        # Deduct balance
-        student.balance -= product.price
+        pos_id = (
+            charge.point_of_sale_id
+            or current_user.point_of_sale_id
+            or student.point_of_sale_id
+        )
+        if pos_id is None:
+            raise HTTPException(status_code=400, detail="Point of sale must be specified")
+
+        stock_record = get_or_create_product_stock(session, product.id, pos_id)
+        if stock_record.current_stock < quantity:
+            raise HTTPException(status_code=400, detail="Insufficient stock at this point of sale")
+
+        if charge.payment_method == "balance":
+            if student.balance < total_amount:
+                raise HTTPException(status_code=400, detail="Insufficient balance")
+            student.balance -= total_amount
+        elif charge.payment_method == "cash":
+            # cash doesn't change student balance
+            pass
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported payment method")
+
         session.add(student)
-        
-        # Decrease stock
-        if hasattr(product, "stock") and product.stock is not None:
-            product.stock -= 1
-            session.add(product)
+
+        # Decrease stock for point of sale
+        stock_record.current_stock -= quantity
+        stock_record.updated_at = datetime.utcnow()
+        session.add(stock_record)
 
         # Log transaction
         transaction = Transaction(
             student_id=charge.student_id,
             product_id=charge.product_id,
-            amount=product.price
+            amount=total_amount,
+            payment_method=charge.payment_method,
+            point_of_sale_id=pos_id,
+            cashier_id=current_user.id,
+            quantity=quantity,
         )
         session.add(transaction)
 
         session.commit()
 
+        low_stock = stock_record.current_stock <= stock_record.min_stock
+
         return {
             "success": True,
             "student_name": student.name,
             "product_name": product.name,
-            "amount": product.price,
+            "amount": total_amount,
+            "quantity": quantity,
             "new_balance": student.balance,
-            "new_stock": product.stock,
+            "point_of_sale_id": pos_id,
+            "stock_remaining": stock_record.current_stock,
+            "low_stock": low_stock,
         }
 
 @app.get("/api/transactions")
@@ -1088,6 +1810,10 @@ async def list_transactions(
                 "product_id": p.id,
                 "product_name": p.name,
                 "amount": t.amount,
+                "quantity": t.quantity,
+                "payment_method": t.payment_method,
+                "point_of_sale_id": t.point_of_sale_id,
+                "cashier_id": t.cashier_id,
                 "created_at": t.created_at.isoformat(),
             }
             for (t, s, p) in rows
@@ -1190,6 +1916,13 @@ async def analytics_summary(
 
 # Serve data directory for faces and other assets
 app.mount("/data", StaticFiles(directory=str(DATA_DIR)), name="data")
+
+
+@app.get("/sales")
+async def sales_page():
+    """Dedicated sales page route"""
+    return FileResponse(STATIC_DIR / "sales.html")
+
 
 # Mount static files (absolute path to avoid CWD issues)
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

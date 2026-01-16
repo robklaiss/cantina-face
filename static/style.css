@@ -4,6 +4,10 @@
     padding: 0;
     box-sizing: border-box;
 }
+
+html {
+    height: 100%;
+}
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
 :root {
     /* Palette */
@@ -49,6 +53,14 @@ body {
     min-height: 100vh;
     overflow-x: hidden;
     overflow-y: auto;
+}
+
+body.sales-view {
+    height: 100vh;
+    min-height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
 }
 
 .hidden {
@@ -102,6 +114,15 @@ body {
     padding: var(--space-xl);
 }
 
+body.sales-view #main-container {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: 1fr;
+    grid-template-areas: "sales student";
+    height: auto;
+    flex: 1;
+    padding-bottom: var(--space-lg);
+}
+
 #main-container > div {
     background-color: var(--surface);
     border: 1px solid var(--border);
@@ -120,6 +141,18 @@ body {
     display: flex;
     flex-direction: column;
     gap: var(--space-lg);
+}
+
+body.sales-view #sales-right {
+    grid-area: student;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-lg);
+}
+
+body.sales-view #sales-left,
+body.sales-view #sales-right {
+    overflow: hidden;
 }
 
 #student-column {
@@ -272,8 +305,10 @@ body {
 }
 
 /* Products Zone */
-#products-zone {
-    position: relative;
+body.sales-view #products-zone {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
 }
 
 #products-grid {
@@ -368,8 +403,17 @@ body {
 }
 
 /* Search Zone */
-#search-zone {
+body.sales-view #search-zone {
     position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 0 0 auto;
+    min-height: 140px;
+    transition: flex 0.25s ease;
+}
+
+body.sales-view #search-zone:focus-within {
+    flex: 1;
 }
 
 #search-header {
@@ -399,10 +443,10 @@ body {
     border-color: #4caf50;
 }
 
-#search-results {
-    max-height: 150px;
+body.sales-view #search-results {
+    flex: 1;
+    max-height: none;
     overflow-y: auto;
-    margin-bottom: 12px;
 }
 
 .search-result {
