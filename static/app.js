@@ -12,9 +12,34 @@ let manualStudentSelection = false; // Track if user manually selected student
 let fpsCounter = 0;
 let lastFpsUpdate = Date.now();
 let frameCount = 0;
+let lastFrameTimestamp = null;
+let smoothedFps = 0;
+const FPS_SMOOTHING = 0.2;
 let saleMode = false;
 let cart = [];
 let recognitionPausedByMode = false;
+const AUTH_TOKEN_KEY = 'cantina_face_token';
+const AUTH_USER_KEY = 'cantina_face_user';
+const AUTH_PROFILE_KEY = 'cantina_face_user_profile';
+const DEFAULT_POINT_OF_SALE_ID = 1;
+let authToken = localStorage.getItem(AUTH_TOKEN_KEY) || null;
+let authUserEmail = localStorage.getItem(AUTH_USER_KEY) || null;
+let authUserProfile = loadProfileFromStorage();
+let appInitialized = false;
+const nativeFetch = window.fetch.bind(window);
+
+function currentPathWithFallback() {
+    const path = `${window.location.pathname}${window.location.search}`;
+    if (!path || path === '/' || path.startsWith('/login')) {
+        return '/index.html';
+    }
+    return path;
+}
+
+function redirectToLogin() {
+    const next = encodeURIComponent(currentPathWithFallback());
+    window.location.href = `/login.html?next=${next}`;
+}
 
 // Helpers
 function formatGs(amount) {
@@ -32,6 +57,86 @@ function navigateToSalesView(studentId) {
     window.location.href = `/sales?student_id=${encodeURIComponent(studentId)}`;
 }
 
+function loadProfileFromStorage() {
+    try {
+        const raw = localStorage.getItem(AUTH_PROFILE_KEY);
+        return raw ? JSON.parse(raw) : null;
+    } catch (error) {
+        console.warn('Failed to parse stored profile', error);
+        return null;
+    }
+}
+
+function setAuthUserProfile(profile) {
+    authUserProfile = profile || null;
+    if (profile) {
+        localStorage.setItem(AUTH_PROFILE_KEY, JSON.stringify(profile));
+    } else {
+        localStorage.removeItem(AUTH_PROFILE_KEY);
+    }
+}
+
+function setAuthSession(token, email) {
+    authToken = token || null;
+    authUserEmail = email || null;
+    if (authToken) {
+        localStorage.setItem(AUTH_TOKEN_KEY, authToken);
+        if (authUserEmail) localStorage.setItem(AUTH_USER_KEY, authUserEmail);
+    } else {
+        localStorage.removeItem(AUTH_TOKEN_KEY);
+        localStorage.removeItem(AUTH_USER_KEY);
+        setAuthUserProfile(null);
+    }
+    updateLogoutButton();
+    hideAuthWarning();
+}
+
+function updateLogoutButton() {
+    if (!logoutBtn) return;
+    if (authToken) {
+        logoutBtn.classList.remove('hidden');
+    } else {
+        logoutBtn.classList.add('hidden');
+    }
+}
+
+function handleUnauthorized() {
+    if (!authToken) return;
+    showNotification('Sesión expirada, vuelve a ingresar', 'error');
+    logout(true);
+}
+
+async function fetchWithAuth(url, options = {}) {
+    const headers = options.headers ? { ...options.headers } : {};
+    if (authToken && !headers['Authorization']) {
+        headers['Authorization'] = `Bearer ${authToken}`;
+    }
+    const response = await nativeFetch(url, { ...options, headers });
+    if (response.status === 401 && authToken) {
+        handleUnauthorized();
+    }
+    return response;
+}
+
+window.fetch = fetchWithAuth;
+
+async function ensureUserProfile() {
+    if (!authToken || authUserProfile) return;
+    try {
+        const response = await fetchWithAuth('/auth/me');
+        if (response.ok) {
+            const profile = await response.json();
+            setAuthUserProfile(profile);
+        }
+    } catch (error) {
+        console.error('Failed to load user profile:', error);
+    }
+}
+
+function getActivePointOfSaleId() {
+    return authUserProfile?.point_of_sale_id ?? DEFAULT_POINT_OF_SALE_ID;
+}
+
 function pauseRecognitionForMode(allowResume = true) {
     if (!recognitionEnabled) {
         recognitionPausedByMode = false;
@@ -45,6 +150,12 @@ function pauseRecognitionForMode(allowResume = true) {
     recognitionIndicator.className = 'status-indicator warning';
     cameraIndicator.textContent = '❌';
     cameraIndicator.className = 'status-indicator error';
+    if (fpsValue) {
+        fpsValue.textContent = '0';
+    }
+    if (fpsStatus) {
+        fpsStatus.title = 'Cámara detenida';
+    }
     if (toggleRecognitionBtn) {
         toggleRecognitionBtn.textContent = 'Encender reconocimiento';
     }
@@ -73,7 +184,9 @@ async function resumeRecognitionAfterMode() {
 // Search products (manual search in sale mode)
 function searchProducts(query) {
     const trimmed = (query || '').trim().toLowerCase();
+    if (!searchResults) return;
     searchResults.innerHTML = '';
+    searchResults.classList.remove('visible');
 
     if (!trimmed) {
         return;
@@ -81,6 +194,7 @@ function searchProducts(query) {
 
     if (!products || products.length === 0) {
         searchResults.innerHTML = '<p class="no-data">Sin productos cargados</p>';
+        searchResults.classList.add('visible');
         return;
     }
 
@@ -92,6 +206,7 @@ function searchProducts(query) {
 
     if (matches.length === 0) {
         searchResults.innerHTML = '<p class="no-data">Sin productos coincidentes</p>';
+        searchResults.classList.add('visible');
         return;
     }
 
@@ -99,31 +214,47 @@ function searchProducts(query) {
 }
 
 function displayProductSearchResults(productList) {
+    if (!searchResults) return;
     searchResults.innerHTML = '';
 
     productList.forEach((product) => {
+        const stockAmount = typeof product.stock === 'number' ? product.stock : 0;
+        const inStock = stockAmount > 0;
         const div = document.createElement('div');
-        div.className = 'search-result';
+        div.className = 'search-result' + (inStock ? '' : ' out-of-stock');
         div.innerHTML = `
             <div class="search-info">
                 <div class="search-name">${product.name}</div>
                 <div class="search-grade">${formatGs(product.price)} Gs.</div>
-                <div class="search-balance">${typeof product.stock === 'number' ? 'Stock: ' + product.stock : ''}</div>
+                <div class="search-balance">
+                    ${inStock ? `Stock: ${stockAmount}` : '<span class="status-out-of-stock">Fuera de stock</span>'}
+                </div>
             </div>
         `;
 
-        div.addEventListener('click', () => {
-            if (!currentStudent) {
-                showNotification('No hay alumno seleccionado', 'error');
-                return;
-            }
-            addToCart(product.id);
-            searchInput.value = '';
-            searchResults.innerHTML = '';
-        });
+        if (inStock) {
+            div.addEventListener('click', () => {
+                if (!currentStudent) {
+                    showNotification('No hay alumno seleccionado', 'error');
+                    return;
+                }
+                addToCart(product.id);
+                searchInput.value = '';
+                searchResults.innerHTML = '';
+                searchResults.classList.remove('visible');
+            });
+        } else {
+            div.title = 'Fuera de stock';
+        }
 
         searchResults.appendChild(div);
     });
+
+    if (productList.length > 0) {
+        searchResults.classList.add('visible');
+    } else {
+        searchResults.classList.remove('visible');
+    }
 }
 
 // DOM elements
@@ -139,6 +270,7 @@ const attachFaceBtn = document.getElementById('attach-face-btn');
 const cameraIndicator = document.getElementById('camera-indicator');
 const recognitionIndicator = document.getElementById('recognition-indicator');
 const fpsValue = document.getElementById('fps-value');
+const fpsStatus = document.getElementById('fps-status');
 const videoZone = document.getElementById('video-zone');
 const productButtons = document.querySelectorAll('.product-btn');
 const selectedProductSpan = document.getElementById('selected-product');
@@ -163,6 +295,18 @@ const toggleRecognitionBtn = document.getElementById('toggle-recognition-btn');
 const adminBtn = document.getElementById('admin-btn');
 const statusRight = document.querySelector('#status-bar .status-right');
 let saleCloseBtn = null;
+const logoutBtn = document.getElementById('logout-btn');
+const authWarning = document.getElementById('auth-warning');
+
+function showAuthWarning(message = 'Inicia sesión para continuar') {
+    if (!authWarning) return;
+    authWarning.textContent = message;
+    authWarning.classList.remove('hidden');
+}
+
+function hideAuthWarning() {
+    authWarning?.classList.add('hidden');
+}
 
 function ensureSaleCloseButton() {
     if (saleCloseBtn || !statusRight) return saleCloseBtn;
@@ -180,31 +324,57 @@ function ensureSaleCloseButton() {
 async function init() {
     // Bind UI events early so navigation works even if initialization fails (e.g., camera denied)
     setupEventListeners();
+
+    if (!authToken) {
+        showAuthWarning('Redirigiendo al inicio de sesión...');
+        redirectToLogin();
+        return;
+    }
+
+    await ensureUserProfile();
+
+    updateLogoutButton();
+    logoutBtn?.addEventListener('click', () => logout());
+
     try {
         await loadProducts();
         await startCamera();
         startRecognition();
         showNotification('System initialized', 'success');
+        appInitialized = true;
     } catch (error) {
-        // Keep UI usable even on partial failures
         showNotification('Failed to initialize: ' + error.message, 'error');
     }
 
-    // Attach current face button
     if (attachFaceBtn) {
         attachFaceBtn.addEventListener('click', attachCurrentFaceToStudent);
     }
 }
 
+function logout(silent = false) {
+    stopRecognition();
+    stopCamera();
+    setAuthSession(null, null);
+    appInitialized = false;
+    if (!silent) {
+        showNotification('Sesión cerrada', 'info');
+    }
+    redirectToLogin();
+}
+
+// ...
+
 // Load products from API
 async function loadProducts() {
     try {
-        const response = await fetch('/api/products');
+        const response = await fetchWithAuth('/api/products');
         products = await response.json();
 
-        // Update product buttons with names and prices and real IDs
+        const availableProducts = products.filter(product => (product?.stock ?? 0) > 0);
+
+        // Update product buttons with names and prices and real IDs (only for in-stock products)
         productButtons.forEach((btn, index) => {
-            const product = products[index];
+            const product = availableProducts[index];
             if (product) {
                 btn.dataset.productId = String(product.id);
                 btn.title = `${product.name} — ${formatGs(product.price)} Gs.`;
@@ -219,7 +389,7 @@ async function loadProducts() {
                 // No product for this slot
                 btn.removeAttribute('data-product-id');
                 btn.innerHTML = `<span class="label">—</span>`;
-                btn.title = '';
+                btn.title = 'Fuera de stock';
                 btn.disabled = true;
                 btn.classList.add('disabled');
             }
@@ -257,11 +427,18 @@ async function startCamera() {
         }
         cameraIndicator.textContent = '✅';
         cameraIndicator.className = 'status-indicator success';
+        resetFpsDisplay('--', 'Cámara preparada, esperando frames');
         console.log('📷 Camera initialized successfully');
     } catch (error) {
         console.error('❌ Camera error:', error);
         cameraIndicator.textContent = '❌';
         cameraIndicator.className = 'status-indicator error';
+        if (fpsValue) {
+            fpsValue.textContent = '0';
+        }
+        if (fpsStatus) {
+            fpsStatus.title = 'Cámara no disponible';
+        }
         throw new Error('Camera access denied: ' + (error && error.message ? error.message : String(error)));
     }
 }
@@ -295,6 +472,9 @@ function startRecognition() {
 
     lastFpsUpdate = Date.now();
     frameCount = 0;
+    lastFrameTimestamp = null;
+    smoothedFps = 0;
+    resetFpsDisplay('--', 'Inicializando reconocimiento');
     recognitionIndicator.textContent = '⏳';
     recognitionIndicator.className = 'status-indicator info';
 
@@ -325,18 +505,30 @@ function startRecognition() {
             const result = await response.json();
             updateRecognitionResult(result);
 
-            // Update FPS counter
-            frameCount++;
+            // Update FPS counter based on actual frame duration
             const now = Date.now();
+            frameCount += 1;
             if (now - lastFpsUpdate >= 1000) {
-                fpsValue.textContent = frameCount;
+                const instantaneousFps = frameCount * (1000 / (now - lastFpsUpdate));
+                smoothedFps = smoothedFps === 0
+                    ? instantaneousFps
+                    : (smoothedFps * (1 - FPS_SMOOTHING)) + (instantaneousFps * FPS_SMOOTHING);
+                if (fpsValue) {
+                    fpsValue.textContent = smoothedFps.toFixed(1);
+                }
+                if (fpsStatus) {
+                    fpsStatus.title = `Último cálculo: ${smoothedFps.toFixed(2)} FPS`;
+                }
                 frameCount = 0;
                 lastFpsUpdate = now;
             }
+            lastFrameTimestamp = now;
 
         } catch (error) {
             console.error('Recognition error:', error);
             recognitionIndicator.textContent = '❌';
+            recognitionIndicator.className = 'status-indicator error';
+            resetFpsDisplay('0', 'Error de reconocimiento');
         }
     }, FRAME_INTERVAL_MS);
 }
@@ -350,6 +542,7 @@ function stopRecognition() {
     frameCount = 0;
     recognitionIndicator.textContent = '⏹';
     recognitionIndicator.className = 'status-indicator';
+    resetFpsDisplay('0', 'Reconocimiento detenido');
 
     const faceBbox = document.getElementById('face-bbox');
     if (faceBbox) {
@@ -369,6 +562,9 @@ function updateRecognitionResult(result) {
 
     if (result.match) {
         showStudentCard(result.student, result.score);
+        recognitionIndicator.textContent = '✅';
+        recognitionIndicator.className = 'status-indicator success';
+        recognitionIndicator.title = result.student?.name ? `Reconocido: ${result.student.name}` : 'Reconocimiento exitoso';
     } else {
         // Only clear if user hasn't manually selected a student
         if (!manualStudentSelection) {
@@ -376,6 +572,17 @@ function updateRecognitionResult(result) {
             hideStudentCard();
         }
         recognitionIndicator.textContent = '⏳';
+        recognitionIndicator.className = 'status-indicator info';
+        recognitionIndicator.title = 'Sin coincidencias en el último frame';
+    }
+}
+
+function resetFpsDisplay(value = '0', tooltip = '') {
+    if (fpsValue) {
+        fpsValue.textContent = value;
+    }
+    if (fpsStatus) {
+        fpsStatus.title = tooltip || '';
     }
 }
 
@@ -401,13 +608,19 @@ function updateFaceDetectionOverlay(detection) {
     
     const width = x2 - x1;
     const height = y2 - y1;
+
+    // Expand vertically to capture full face (forehead to chin)
+    const expandedHeight = height * 1.4;
+    const deltaHeight = (expandedHeight - height) / 2;
+    const adjustedY = Math.max(0, y1 - deltaHeight);
+    const clampedHeight = Math.min(expandedHeight, overlayRect.height - adjustedY);
     
     // Update bbox element
     faceBbox.style.display = 'block';
     faceBbox.style.left = `${x1}px`;
-    faceBbox.style.top = `${y1}px`;
+    faceBbox.style.top = `${adjustedY}px`;
     faceBbox.style.width = `${width}px`;
-    faceBbox.style.height = `${height}px`;
+    faceBbox.style.height = `${clampedHeight}px`;
     
     // Add confidence indicator
     const confidence = Math.round(detection.confidence * 100);
@@ -562,6 +775,15 @@ function renderCart() {
 }
 
 function addToCart(productId) {
+    const product = products.find(p => p.id === productId);
+    if (!product) {
+        showNotification('Producto no disponible', 'error');
+        return;
+    }
+    if ((product.stock ?? 0) <= 0) {
+        showNotification('Producto fuera de stock', 'warning');
+        return;
+    }
     const existing = cart.find(item => item.productId === productId);
     if (existing) {
         existing.quantity += 1;
@@ -678,18 +900,21 @@ async function chargeCart() {
         return;
     }
 
+    const pointOfSaleId = getActivePointOfSaleId();
+
     try {
         for (const item of cart) {
             const product = products.find(p => p.id === item.productId);
             if (!product) continue;
 
             for (let i = 0; i < item.quantity; i++) {
-                const response = await fetch('/api/charge', {
+                const response = await fetchWithAuth('/api/charge', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         student_id: currentStudent.id,
-                        product_id: product.id
+                        product_id: product.id,
+                        point_of_sale_id: pointOfSaleId,
                     })
                 });
 
@@ -748,7 +973,10 @@ async function searchStudents(query) {
 async function quickSearchStudents(query) {
     const trimmed = (query || '').trim();
     if (!trimmed) {
-        quickSearchResults.innerHTML = '';
+        if (quickSearchResults) {
+            quickSearchResults.innerHTML = '';
+            quickSearchResults.classList.remove('visible');
+        }
         return;
     }
 
@@ -806,6 +1034,8 @@ function displaySearchResults(students) {
 
 // Display quick search results (student zone)
 function displayQuickSearchResults(students) {
+    if (!quickSearchResults) return;
+
     quickSearchResults.innerHTML = '';
 
     students.forEach((student) => {
@@ -824,6 +1054,12 @@ function displayQuickSearchResults(students) {
 
         quickSearchResults.appendChild(div);
     });
+
+    if (students.length > 0) {
+        quickSearchResults.classList.add('visible');
+    } else {
+        quickSearchResults.classList.remove('visible');
+    }
 }
 
 // Setup event listeners

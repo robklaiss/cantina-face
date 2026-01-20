@@ -12,7 +12,10 @@
     <!-- Barra Superior -->
     <div id="status-bar">
         <span>Admin Panel</span>
-        <button id="back-to-main" class="back-btn">← Volver al Menú</button>
+        <div class="status-actions">
+            <button id="back-to-main" class="back-btn">← Volver al Menú</button>
+            <button id="admin-logout-btn" class="secondary-btn">Cerrar sesión</button>
+        </div>
     </div>
 
     <div id="admin-container">
@@ -23,6 +26,7 @@
                 <button class="nav-btn active" data-section="students">👥 Estudiantes</button>
                 <button class="nav-btn" data-section="products">🛒 Productos</button>
                 <button class="nav-btn" data-section="transactions">💰 Transacciones</button>
+                <button class="nav-btn" data-section="topups">💳 Cargas de saldo</button>
                 <button class="nav-btn" data-section="analytics">📊 Analíticas</button>
             </nav>
         </div>
@@ -37,6 +41,17 @@
                         <input type="text" id="student-search" placeholder="Buscar estudiante..." />
                         <button id="add-student-btn" class="primary-btn">+ Nuevo Estudiante</button>
                     </div>
+
+            <!-- Sección de Top-ups -->
+            <div id="topups-section" class="admin-section">
+                <div class="section-header">
+                    <h3>Solicitudes de carga de saldo</h3>
+                    <p class="section-subtitle">Aprueba o rechaza las solicitudes enviadas por los padres</p>
+                </div>
+                <div id="topups-list" class="topups-list">
+                    <!-- Top-up requests will be rendered here -->
+                </div>
+            </div>
                 </div>
 
                 <div id="students-grid" class="students-grid">
@@ -48,7 +63,10 @@
             <div id="products-section" class="admin-section">
                 <div class="section-header">
                     <h3>Gestión de Productos</h3>
-                    <button id="add-product-btn" class="primary-btn">+ Nuevo Producto</button>
+                    <div class="section-actions">
+                        <input type="text" id="product-search" placeholder="Buscar producto..." />
+                        <button id="add-product-btn" class="primary-btn">+ Nuevo Producto</button>
+                    </div>
                 </div>
                 <div id="products-list">
                     <!-- Products will be loaded here -->
@@ -75,21 +93,105 @@
 
             <!-- Sección de Analíticas -->
             <div id="analytics-section" class="admin-section">
-                <div class="section-header">
-                    <h3>Analíticas y Reportes</h3>
+                <div class="section-header analytics-header">
+                    <div>
+                        <h3>Analíticas y Reportes</h3>
+                        <p class="section-subtitle">Resumen operativo de los últimos movimientos</p>
+                    </div>
+                    <div class="date-range-pills">
+                        <span class="badge muted">Intervalo actual</span>
+                    </div>
                 </div>
-                <div class="analytics-grid">
-                    <div class="analytics-card">
-                        <h4>Productos Más Vendidos</h4>
-                        <div id="top-products"></div>
+
+                <div class="analytics-summary-grid">
+                    <div class="summary-card">
+                        <p class="label">Total vendido</p>
+                        <h4 id="summary-total-sales">--</h4>
+                        <small>Guaraníes</small>
                     </div>
-                    <div class="analytics-card">
-                        <h4>Estudiantes Más Activos</h4>
-                        <div id="top-students"></div>
+                    <div class="summary-card">
+                        <p class="label">Transacciones</p>
+                        <h4 id="summary-total-transactions">--</h4>
+                        <small>Operaciones registradas</small>
                     </div>
-                    <div class="analytics-card">
-                        <h4>Ventas por Día</h4>
-                        <div id="daily-sales"></div>
+                    <div class="summary-card">
+                        <p class="label">Ticket promedio</p>
+                        <h4 id="summary-average-ticket">--</h4>
+                        <small>Monto por compra</small>
+                    </div>
+                    <div class="summary-card">
+                        <p class="label">Alumnos activos</p>
+                        <h4 id="summary-unique-students">--</h4>
+                        <small>Últimos movimientos</small>
+                    </div>
+                    <div class="summary-card wide">
+                        <p class="label">Mejor día</p>
+                        <h4 id="summary-best-day-label">--</h4>
+                        <small id="summary-best-day-amount">Sin ventas registradas</small>
+                    </div>
+                </div>
+
+                <div class="analytics-data-grid">
+                    <div class="analytics-card data-card">
+                        <div class="card-header">
+                            <div>
+                                <h4>Productos más vendidos</h4>
+                                <p>Top 5 por monto acumulado</p>
+                            </div>
+                            <span class="badge" id="top-products-count">0</span>
+                        </div>
+                        <ul class="data-list" id="top-products-list"></ul>
+                        <div class="empty-state hidden" id="top-products-empty">Sin datos disponibles</div>
+                    </div>
+                    <div class="analytics-card data-card">
+                        <div class="card-header">
+                            <div>
+                                <h4>Estudiantes más activos</h4>
+                                <p>Top 5 por gasto acumulado</p>
+                            </div>
+                            <span class="badge" id="top-students-count">0</span>
+                        </div>
+                        <ul class="data-list" id="top-students-list"></ul>
+                        <div class="empty-state hidden" id="top-students-empty">Sin datos disponibles</div>
+                    </div>
+                </div>
+
+                <div class="analytics-charts-grid">
+                    <div class="analytics-card chart-card">
+                        <div class="card-header">
+                            <div>
+                                <h4>Ingresos por producto</h4>
+                                <p>Comparativa de ventas</p>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="top-products-chart" height="220"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="analytics-card chart-card">
+                        <div class="card-header">
+                            <div>
+                                <h4>Gasto por estudiante</h4>
+                                <p>Ticket acumulado</p>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="top-students-chart" height="220"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="analytics-card chart-card wide">
+                        <div class="card-header">
+                            <div>
+                                <h4>Ventas por día</h4>
+                                <p>Ingresos diarios y cantidad de tickets</p>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="daily-sales-chart" height="260"></canvas>
+                            <div class="empty-state hidden" id="daily-sales-empty">Sin ventas registradas</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -175,6 +277,7 @@
     <!-- Custom Confirmation Modal -->
     <div id="custom-confirmation-modal" class="hidden"></div>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="/admin.js"></script>
 </body>
 </html>

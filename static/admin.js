@@ -1,10 +1,20 @@
 // Global variables for admin panel
 let currentStudents = [];
+let currentProducts = [];
 let currentStudent = null;
 let adminVideoStream = null;
 let currentSection = 'students';
 let searchDebounceTimer = null;
+let productSearchDebounceTimer = null;
 const DEBOUNCE_DELAY = 300;
+let topProductsChartInstance = null;
+let topStudentsChartInstance = null;
+let dailySalesChartInstance = null;
+const AUTH_TOKEN_KEY = 'cantina_face_token';
+const AUTH_USER_KEY = 'cantina_face_user';
+let adminAuthToken = localStorage.getItem(AUTH_TOKEN_KEY) || null;
+let adminAuthEmail = localStorage.getItem(AUTH_USER_KEY) || null;
+const nativeFetch = window.fetch.bind(window);
 
 function formatGs(amount) {
     const n = Number(amount) || 0;
@@ -16,10 +26,75 @@ function formatGs(amount) {
 }
 
 // DOM elements (assigned at init time)
-let adminSidebar, adminContent, studentModal, studentsGrid, studentSearch;
+let adminSidebar, adminContent, studentModal, studentsGrid, studentSearch, productSearchInput, adminLogoutBtn;
+
+function currentPathWithFallback() {
+    const path = `${window.location.pathname}${window.location.search}`;
+    if (!path || path === '/' || path.startsWith('/login')) {
+        return '/admin.html';
+    }
+    return path;
+}
+
+function redirectToLogin() {
+    const next = encodeURIComponent(currentPathWithFallback());
+    window.location.href = `/login.html?next=${next}`;
+}
+
+function setAuthSession(token, email) {
+    adminAuthToken = token || null;
+    adminAuthEmail = email || null;
+    if (adminAuthToken) {
+        localStorage.setItem(AUTH_TOKEN_KEY, adminAuthToken);
+        if (adminAuthEmail) {
+            localStorage.setItem(AUTH_USER_KEY, adminAuthEmail);
+        }
+    } else {
+        localStorage.removeItem(AUTH_TOKEN_KEY);
+        localStorage.removeItem(AUTH_USER_KEY);
+    }
+}
+
+function handleUnauthorized() {
+    showNotification('Sesión expirada, vuelve a ingresar', 'error');
+    logoutAdmin(true);
+}
+
+async function fetchWithAuth(url, options = {}) {
+    const headers = options.headers ? { ...options.headers } : {};
+    if (adminAuthToken && !headers['Authorization']) {
+        headers['Authorization'] = `Bearer ${adminAuthToken}`;
+    }
+    const response = await nativeFetch(url, { ...options, headers });
+    if (response.status === 401) {
+        handleUnauthorized();
+    }
+    return response;
+}
+
+window.fetch = fetchWithAuth;
+
+function ensureAuthenticated() {
+    if (!adminAuthToken) {
+        redirectToLogin();
+        return false;
+    }
+    return true;
+}
+
+function logoutAdmin(silent = false) {
+    setAuthSession(null, null);
+    if (!silent) {
+        showNotification('Sesión cerrada', 'info');
+    }
+    redirectToLogin();
+}
 
 // Initialize admin panel
 function initAdminPanel() {
+    if (!ensureAuthenticated()) {
+        return;
+    }
     console.log('[admin] initAdminPanel');
     // Assign DOM elements now that DOM is ready
     adminSidebar = document.getElementById('admin-sidebar');
@@ -27,10 +102,10 @@ function initAdminPanel() {
     studentModal = document.getElementById('student-modal');
     studentsGrid = document.getElementById('students-grid');
     studentSearch = document.getElementById('student-search');
+    productSearchInput = document.getElementById('product-search');
+    adminLogoutBtn = document.getElementById('admin-logout-btn');
     setupAdminEventListeners();
     setupNavigation();
-    // Load initial data only once
-    loadStudents();
 }
 
 if (document.readyState === 'loading') {
@@ -51,6 +126,10 @@ function setupAdminEventListeners() {
         });
     }
 
+    if (adminLogoutBtn) {
+        adminLogoutBtn.addEventListener('click', () => logoutAdmin());
+    }
+
     // Section navigation
     document.querySelectorAll('.nav-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
@@ -62,6 +141,12 @@ function setupAdminEventListeners() {
     if (studentSearch) {
         studentSearch.addEventListener('input', (e) => {
             filterStudents(e.target.value);
+        });
+    }
+
+    if (productSearchInput) {
+        productSearchInput.addEventListener('input', (e) => {
+            filterProducts(e.target.value);
         });
     }
 
@@ -177,7 +262,7 @@ function switchSection(section) {
 // Load students
 async function loadStudents() {
     try {
-        const response = await fetch('/api/students?limit=100');
+        const response = await fetchWithAuth('/api/students?limit=100');
         const students = await response.json();
         currentStudents = students;
         renderStudents(students);
@@ -230,6 +315,10 @@ function renderStudents(students) {
                 <h4>${student.name}</h4>
                 <p class="grade">${student.grade}</p>
                 <p class="balance">Saldo: ${formatGs(student.balance)} Gs.</p>
+                <p class="student-id-row">ID:
+                    <code>${student.id}</code>
+                    <button type="button" class="copy-id-btn" data-id="${student.id}">Copiar ID</button>
+                </p>
             </div>
             <div class="student-actions">
                 <button class="edit-btn">✏️ Editar</button>
@@ -245,6 +334,20 @@ function renderStudents(students) {
         const historyBtn = studentCard.querySelector('.history-btn');
         if (editBtn) editBtn.addEventListener('click', () => editStudent(student.id));
         if (historyBtn) historyBtn.addEventListener('click', () => viewHistory(student.id));
+        const copyBtn = studentCard.querySelector('.copy-id-btn');
+        if (copyBtn) {
+            copyBtn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const value = copyBtn.dataset.id || '';
+                if (!value) {
+                    showNotification('ID no disponible', 'error');
+                    return;
+                }
+                navigator.clipboard?.writeText(value)
+                    .then(() => showNotification('ID de alumno copiado', 'success'))
+                    .catch(() => showNotification('No se pudo copiar el ID', 'error'));
+            });
+        }
         fragment.appendChild(studentCard);
     });
     
@@ -596,6 +699,10 @@ function showAddProductModal() {
                         <label for="product-stock">Stock inicial:</label>
                         <input type="number" id="product-stock" min="0" step="1" required placeholder="0" />
                     </div>
+                    <div class="form-group">
+                        <label for="product-min-stock">Alerta de stock mínimo:</label>
+                        <input type="number" id="product-min-stock" min="0" step="1" required placeholder="20" value="20" />
+                    </div>
                 </form>
             </div>
             <div class="modal-footer">
@@ -620,9 +727,16 @@ async function addProduct() {
     const name = document.getElementById('product-name').value.trim();
     const price = parseInt(document.getElementById('product-price').value);
     const stock = parseInt(document.getElementById('product-stock').value) || 0;
+    const minStockInput = document.getElementById('product-min-stock');
+    const minStock = parseInt(minStockInput.value);
 
     if (!name || !price || price <= 0) {
         showNotification('Por favor ingresa un nombre y precio válido', 'error');
+        return;
+    }
+
+    if (isNaN(minStock) || minStock < 0) {
+        showNotification('El stock mínimo debe ser 0 o mayor', 'error');
         return;
     }
 
@@ -633,7 +747,8 @@ async function addProduct() {
             body: JSON.stringify({
                 name: name,
                 price: price,
-                stock: stock
+                stock: stock,
+                default_min_stock: minStock
             })
         });
 
@@ -652,6 +767,7 @@ async function addProduct() {
         document.getElementById('product-name').value = '';
         document.getElementById('product-price').value = '';
         document.getElementById('product-stock').value = '';
+        minStockInput.value = '20';
 
         // Refresh the products list with a small delay
         setTimeout(() => {
@@ -667,40 +783,68 @@ async function addProduct() {
 // Load products (placeholder)
 async function loadProducts() {
     try {
-        const response = await fetch('/api/products');
+        const response = await fetchWithAuth('/api/products');
         const products = await response.json();
+        currentProducts = Array.isArray(products) ? products : [];
+        renderProducts(currentProducts);
 
-        const productsList = document.getElementById('products-list');
-        if (!productsList) return;
-
-        productsList.innerHTML = '';
-
-        if (products.length === 0) {
-            productsList.innerHTML = '<p class="no-data">No hay productos disponibles</p>';
-            return;
+        if (productSearchInput && productSearchInput.value.trim()) {
+            filterProducts(productSearchInput.value);
         }
-
-        products.forEach((product, index) => {
-            const productEl = document.createElement('div');
-            productEl.className = 'product-row';
-            productEl.innerHTML = `
-                <div class="product-name">${product.name}</div>
-                <div class="product-price">${formatGs(product.price)} Gs.</div>
-                <div class="product-stock">Stock: ${product.stock ?? 0}</div>
-                <div class="product-actions">
-                    <button class="edit-btn" onclick="editProduct(${product.id}, '${product.name}', ${product.price}, ${product.stock ?? 0})">✏️ Editar</button>
-                </div>
-            `;
-            productsList.appendChild(productEl);
-        });
 
     } catch (error) {
         showNotification('Error loading products: ' + error.message, 'error');
     }
 }
 
+function renderProducts(products) {
+    const productsList = document.getElementById('products-list');
+    if (!productsList) return;
+
+    productsList.innerHTML = '';
+
+    if (!products || products.length === 0) {
+        productsList.innerHTML = '<p class="no-data">No hay productos disponibles</p>';
+        return;
+    }
+
+    products.forEach((product) => {
+        const safeName = (product.name || '').replace(/'/g, "\\'");
+        const productEl = document.createElement('div');
+        productEl.className = 'product-row';
+        productEl.innerHTML = `
+            <div class="product-name">${product.name}</div>
+            <div class="product-price">${formatGs(product.price)} Gs.</div>
+            <div class="product-stock">Stock: ${product.stock ?? 0}</div>
+            <div class="product-actions">
+                <button class="edit-btn" onclick="editProduct(${product.id}, '${safeName}', ${product.price}, ${product.stock ?? 0}, ${product.default_min_stock ?? 0})">✏️ Editar</button>
+            </div>
+        `;
+        productsList.appendChild(productEl);
+    });
+}
+
+function filterProducts(query) {
+    clearTimeout(productSearchDebounceTimer);
+    productSearchDebounceTimer = setTimeout(() => {
+        const trimmed = (query || '').trim().toLowerCase();
+        if (!trimmed) {
+            renderProducts(currentProducts);
+            return;
+        }
+
+        const filtered = currentProducts.filter((product) => {
+            const name = (product.name || '').toLowerCase();
+            const price = String(product.price || '').toLowerCase();
+            return name.includes(trimmed) || price.includes(trimmed);
+        });
+
+        renderProducts(filtered);
+    }, DEBOUNCE_DELAY);
+}
+
 // Edit product
-function editProduct(id, name, price, stock) {
+function editProduct(id, name, price, stock, minStock) {
     const modal = document.getElementById('custom-confirmation-modal');
     modal.innerHTML = `
         <div class="modal-content">
@@ -722,11 +866,15 @@ function editProduct(id, name, price, stock) {
                         <label for="edit-product-stock">Stock:</label>
                         <input type="number" id="edit-product-stock" value="${stock}" min="0" step="1" required />
                     </div>
+                    <div class="form-group">
+                        <label for="edit-product-min-stock">Alerta de stock mínimo:</label>
+                        <input type="number" id="edit-product-min-stock" value="${minStock}" min="0" step="1" required />
+                    </div>
                     <input type="hidden" id="edit-product-id" value="${id}" />
                 </form>
             </div>
             <div class="modal-footer">
-                <button class="primary-btn" onclick="updateProduct()">💾 Guardar Cambios</button>
+                <button class="primary-btn" onclick="updateProduct()"> Guardar Cambios</button>
                 <button class="secondary-btn" onclick="closeAddProductModal()">Cancelar</button>
             </div>
         </div>
@@ -740,20 +888,27 @@ async function updateProduct() {
     const name = document.getElementById('edit-product-name').value.trim();
     const price = parseInt(document.getElementById('edit-product-price').value);
     const stock = parseInt(document.getElementById('edit-product-stock').value);
+    const minStock = parseInt(document.getElementById('edit-product-min-stock').value);
 
     if (!name || !price || price <= 0 || isNaN(stock) || stock < 0) {
         showNotification('Por favor ingresa un nombre, precio y stock válido', 'error');
         return;
     }
 
+    if (isNaN(minStock) || minStock < 0) {
+        showNotification('El stock mínimo debe ser 0 o mayor', 'error');
+        return;
+    }
+
     try {
-        const response = await fetch(`/api/products/${id}`, {
+        const response = await fetchWithAuth(`/api/products/${id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 name: name,
                 price: price,
                 stock: stock,
+                default_min_stock: minStock,
             }),
         });
 
@@ -859,21 +1014,45 @@ async function loadTransactions() {
 
 // Load analytics (placeholder)
 async function loadAnalytics() {
-    const topProducts = document.getElementById('top-products');
-    const topStudents = document.getElementById('top-students');
-    const dailySales = document.getElementById('daily-sales');
+    const summaryNodes = {
+        totalSales: document.getElementById('summary-total-sales'),
+        totalTransactions: document.getElementById('summary-total-transactions'),
+        averageTicket: document.getElementById('summary-average-ticket'),
+        uniqueStudents: document.getElementById('summary-unique-students'),
+        bestDayLabel: document.getElementById('summary-best-day-label'),
+        bestDayAmount: document.getElementById('summary-best-day-amount'),
+    };
 
-    if (!topProducts || !topStudents || !dailySales) {
+    const miniLists = {
+        products: document.getElementById('top-products-list'),
+        students: document.getElementById('top-students-list'),
+    };
+
+    const emptyStates = {
+        products: document.getElementById('top-products-empty'),
+        students: document.getElementById('top-students-empty'),
+        daily: document.getElementById('daily-sales-empty'),
+    };
+
+    const chartCanvases = {
+        products: document.getElementById('top-products-chart'),
+        students: document.getElementById('top-students-chart'),
+        daily: document.getElementById('daily-sales-chart'),
+    };
+
+    if (!summaryNodes.totalSales || !miniLists.products || !chartCanvases.daily) {
         return;
     }
 
     try {
         const response = await fetch('/api/analytics/summary');
         if (!response.ok) {
-            const errorHtml = '<p class="error">Error cargando analíticas</p>';
-            topProducts.innerHTML = errorHtml;
-            topStudents.innerHTML = errorHtml;
-            dailySales.innerHTML = errorHtml;
+            Object.values(emptyStates).forEach(node => {
+                if (node) {
+                    node.textContent = 'Error cargando analíticas';
+                    node.classList.remove('hidden');
+                }
+            });
             return;
         }
 
@@ -881,51 +1060,212 @@ async function loadAnalytics() {
         const topProductsData = data.top_products || [];
         const topStudentsData = data.top_students || [];
         const dailySalesData = data.daily_sales || [];
+        const summary = data.summary || {};
 
-        if (topProductsData.length === 0) {
-            topProducts.innerHTML = '<p class="no-data">Sin datos disponibles</p>';
-        } else {
-            const list = document.createElement('ul');
-            topProductsData.forEach(item => {
-                const li = document.createElement('li');
-                li.textContent = `${item.name}: ${formatGs(item.total_amount)} Gs. (${item.transaction_count} ventas)`;
-                list.appendChild(li);
-            });
-            topProducts.innerHTML = '';
-            topProducts.appendChild(list);
-        }
+        renderSummaryCards(summaryNodes, summary);
+        renderMiniList(miniLists.products, topProductsData, 'ventas');
+        renderMiniList(miniLists.students, topStudentsData, 'compras', true);
+        toggleEmptyState(emptyStates.products, topProductsData.length === 0);
+        toggleEmptyState(emptyStates.students, topStudentsData.length === 0);
+        toggleEmptyState(emptyStates.daily, dailySalesData.length === 0);
 
-        if (topStudentsData.length === 0) {
-            topStudents.innerHTML = '<p class="no-data">Sin datos disponibles</p>';
-        } else {
-            const list = document.createElement('ul');
-            topStudentsData.forEach(item => {
-                const li = document.createElement('li');
-                li.textContent = `${item.name}: ${formatGs(item.total_spent)} Gs. (${item.transaction_count} compras)`;
-                list.appendChild(li);
-            });
-            topStudents.innerHTML = '';
-            topStudents.appendChild(list);
-        }
+        document.getElementById('top-products-count').textContent = topProductsData.length;
+        document.getElementById('top-students-count').textContent = topStudentsData.length;
 
-        if (dailySalesData.length === 0) {
-            dailySales.innerHTML = '<p class="no-data">Sin ventas registradas</p>';
-        } else {
-            const list = document.createElement('ul');
-            dailySalesData.forEach(item => {
-                const li = document.createElement('li');
-                li.textContent = `${item.date}: ${formatGs(item.total_amount)} Gs. (${item.transaction_count} transacciones)`;
-                list.appendChild(li);
-            });
-            dailySales.innerHTML = '';
-            dailySales.appendChild(list);
-        }
+        renderChart('products', chartCanvases.products, topProductsData.map(p => p.name), topProductsData.map(p => p.total_amount));
+        renderChart('students', chartCanvases.students, topStudentsData.map(s => s.name), topStudentsData.map(s => s.total_spent));
+        renderDailySalesChart(chartCanvases.daily, dailySalesData);
     } catch (error) {
-        const errorHtml = '<p class="error">Error cargando analíticas</p>';
-        topProducts.innerHTML = errorHtml;
-        topStudents.innerHTML = errorHtml;
-        dailySales.innerHTML = errorHtml;
+        Object.values(emptyStates).forEach(node => {
+            if (node) {
+                node.textContent = 'Error cargando analíticas';
+                node.classList.remove('hidden');
+            }
+        });
+        console.error('loadAnalytics error:', error);
     }
+}
+
+function renderSummaryCards(nodes, summary) {
+    if (!nodes) return;
+
+    const totalSales = summary.total_sales ?? 0;
+    const totalTransactions = summary.total_transactions ?? 0;
+    const averageTicket = summary.average_ticket ?? 0;
+    const uniqueStudents = summary.unique_students ?? 0;
+    const bestDay = summary.best_day;
+
+    if (nodes.totalSales) nodes.totalSales.textContent = `${formatGs(totalSales)} Gs.`;
+    if (nodes.totalTransactions) nodes.totalTransactions.textContent = totalTransactions;
+    if (nodes.averageTicket) nodes.averageTicket.textContent = `${formatGs(Math.round(averageTicket))} Gs.`;
+    if (nodes.uniqueStudents) nodes.uniqueStudents.textContent = uniqueStudents;
+
+    if (nodes.bestDayLabel && nodes.bestDayAmount) {
+        if (bestDay && bestDay.date) {
+            const label = new Date(bestDay.date).toLocaleDateString('es-PY', {
+                weekday: 'short', day: '2-digit', month: 'short'
+            });
+            nodes.bestDayLabel.textContent = label;
+            nodes.bestDayAmount.textContent = `${formatGs(bestDay.total_amount)} Gs. vendidos`;
+        } else {
+            nodes.bestDayLabel.textContent = '--';
+            nodes.bestDayAmount.textContent = 'Sin ventas registradas';
+        }
+    }
+}
+
+function renderMiniList(container, data, label, isStudent = false) {
+    if (!container) return;
+    container.innerHTML = '';
+
+    if (!data || data.length === 0) {
+        container.innerHTML = '<li class="muted">Sin datos disponibles</li>';
+        return;
+    }
+
+    data.forEach(item => {
+        const li = document.createElement('li');
+        li.innerHTML = `
+            <div>
+                <strong>${item.name}</strong>
+                <span class="muted">${item.transaction_count} ${label}</span>
+            </div>
+            <span class="value">${formatGs(isStudent ? item.total_spent : item.total_amount)} Gs.</span>
+        `;
+        container.appendChild(li);
+    });
+}
+
+function toggleEmptyState(node, isEmpty) {
+    if (!node) return;
+    if (isEmpty) {
+        node.classList.remove('hidden');
+    } else {
+        node.classList.add('hidden');
+    }
+}
+
+function renderChart(type, canvas, labels, values) {
+    if (!canvas || typeof Chart === 'undefined') return;
+    const chartConfig = {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [
+                {
+                    label: 'Guaraníes',
+                    data: values,
+                    backgroundColor: 'rgba(5, 150, 105, 0.5)',
+                    borderColor: 'rgba(5, 150, 105, 1)',
+                    borderWidth: 2,
+                    borderRadius: 8,
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: {
+                    ticks: {
+                        callback: (val) => formatCompactNumber(val),
+                        color: '#cbd5e1'
+                    },
+                    grid: { color: 'rgba(148, 163, 184, 0.2)' }
+                },
+                x: {
+                    ticks: { color: '#cbd5e1' },
+                    grid: { display: false }
+                }
+            },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: context => `${context.dataset.label}: ${formatGs(context.parsed.y ?? context.parsed)} Gs.`
+                    }
+                }
+            }
+        }
+    };
+
+    if (type === 'products' && topProductsChartInstance) topProductsChartInstance.destroy();
+    if (type === 'students' && topStudentsChartInstance) topStudentsChartInstance.destroy();
+
+    if (type === 'products') {
+        topProductsChartInstance = new Chart(canvas, chartConfig);
+    } else if (type === 'students') {
+        topStudentsChartInstance = new Chart(canvas, chartConfig);
+    }
+}
+
+function renderDailySalesChart(canvas, data) {
+    if (!canvas || typeof Chart === 'undefined') return;
+
+    const labels = data.map(item => item.date);
+    const salesValues = data.map(item => item.total_amount);
+
+    const config = {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [
+                {
+                    label: 'Ventas (Gs.)',
+                    data: salesValues,
+                    borderColor: 'rgba(59, 130, 246, 1)',
+                    backgroundColor: 'rgba(59, 130, 246, 0.25)',
+                    tension: 0.35,
+                    fill: true,
+                    borderWidth: 3,
+                    pointRadius: 4,
+                },
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: { callback: (val) => formatCompactNumber(val), color: '#cbd5e1' },
+                    grid: { color: 'rgba(148, 163, 184, 0.2)' }
+                },
+                x: {
+                    ticks: { color: '#cbd5e1' },
+                    grid: { display: false }
+                }
+            },
+            plugins: {
+                legend: { labels: { color: '#e2e8f0' } },
+                tooltip: {
+                    callbacks: {
+                        label: (ctx) => {
+                            if (ctx.datasetIndex === 0) {
+                                return `${ctx.dataset.label}: ${formatGs(ctx.parsed.y)} Gs.`;
+                            }
+                            return `${ctx.dataset.label}: ${ctx.parsed.y}`;
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    if (dailySalesChartInstance) dailySalesChartInstance.destroy();
+    dailySalesChartInstance = new Chart(canvas, config);
+}
+
+function formatCompactNumber(value) {
+    if (!value && value !== 0) return '';
+    if (Math.abs(value) >= 1_000_000) {
+        return `${(value / 1_000_000).toFixed(1)}M`;
+    }
+    if (Math.abs(value) >= 1_000) {
+        return `${(value / 1_000).toFixed(1)}K`;
+    }
+    return String(value);
 }
 
 // View student history
@@ -964,8 +1304,10 @@ function showNotification(message, type = 'info') {
 
 // Setup navigation
 function setupNavigation() {
-    // Set initial section without loading data (already loaded)
-    currentSection = 'students';
-    document.querySelector('[data-section="students"]').classList.add('active');
-    document.getElementById('students-section').classList.add('active');
+    const studentsBtn = document.querySelector('[data-section="students"]');
+    const studentsSection = document.getElementById('students-section');
+    if (studentsBtn) studentsBtn.classList.add('active');
+    if (studentsSection) studentsSection.classList.add('active');
+    currentSection = null;
+    switchSection('students');
 }

@@ -2,10 +2,13 @@ import os
 import json
 import base64
 import shutil
+import sqlite3
 from pathlib import Path
-from typing import List, Optional, Dict, Set, Tuple
-from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Set, Tuple, Any
+from datetime import datetime, timedelta, date, timezone
 from enum import Enum
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import cv2
 import numpy as np
@@ -15,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
-from sqlmodel import SQLModel, Field, Session, create_engine, select
+from sqlmodel import SQLModel, Field, Session, create_engine, select, delete
 from PIL import Image
 import uvicorn
 from jose import JWTError, jwt
@@ -30,6 +33,15 @@ class Role(str, Enum):
     CAJERA = "cajera"
     STOCK = "stock"
     PARENT = "parent"
+
+
+class ProductCategory(str, Enum):
+    GASEOSA = "gaseosa"
+    CHOCOLATE = "chocolate"
+    DULCE = "dulce"
+    HELADO = "helado"
+    SNACK = "snack"
+    OTRO = "otro"
 
 
 class AllergyType(str, Enum):
@@ -56,7 +68,33 @@ class RestrictionMode(str, Enum):
     BLOCK_LIST = "block_list"
 
 
+class BalanceAllocationMode(str, Enum):
+    EQUAL = "equal"
+    CUSTOM = "custom"
+
+
+class BalanceTopUpStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class ScheduledOrderStatus(str, Enum):
+    PENDING = "pending"
+    DISPATCHED = "dispatched"
+    CANCELLED = "cancelled"
+
+
+class ParentStudentLinkStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 # Database models
+DEFAULT_POS_ID = 1
+
+
 class PointOfSale(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
@@ -67,9 +105,14 @@ class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     email: str = Field(index=True, unique=True)
     full_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    dni: Optional[str] = Field(default=None, index=True)
+    phone: Optional[str] = None
     role: Role = Field(default=Role.CAJERA)
     hashed_password: str
     point_of_sale_id: Optional[int] = Field(default=None, foreign_key="pointofsale.id")
+    is_active: bool = Field(default=True)
 
 
 class Student(SQLModel, table=True):
@@ -82,6 +125,15 @@ class Student(SQLModel, table=True):
     point_of_sale_id: Optional[int] = Field(default=None, foreign_key="pointofsale.id")
 
 
+class BalanceAdjustment(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    student_id: str = Field(foreign_key="student.id")
+    amount: int
+    pay_from_balance: bool = Field(default=True)
+    point_of_sale_id: Optional[int] = Field(default=None, foreign_key="pointofsale.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class Product(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
@@ -89,6 +141,7 @@ class Product(SQLModel, table=True):
     stock: int = Field(default=0)
     default_min_stock: int = Field(default=20)
     allergens: Optional[str] = None
+    category: Optional[ProductCategory] = None
 
 
 class ProductStock(SQLModel, table=True):
@@ -96,7 +149,8 @@ class ProductStock(SQLModel, table=True):
     product_id: int = Field(foreign_key="product.id")
     point_of_sale_id: int = Field(foreign_key="pointofsale.id")
     current_stock: int = Field(default=0)
-    min_stock: int = Field(default=20)
+    min_stock: int = Field(default=10)
+    reserved_stock: int = Field(default=0)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -118,6 +172,33 @@ class StudentGuardian(SQLModel, table=True):
     parent_user_id: int = Field(foreign_key="user.id")
 
 
+class ParentStudentLinkRequest(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    parent_id: int = Field(foreign_key="user.id")
+    student_identifier: Optional[str] = None
+    student_name: str
+    student_grade: Optional[str] = None
+    notes: Optional[str] = None
+    status: ParentStudentLinkStatus = Field(default=ParentStudentLinkStatus.PENDING)
+    admin_notes: Optional[str] = None
+    student_id: Optional[str] = Field(default=None, foreign_key="student.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    processed_at: Optional[datetime] = None
+
+
+class ProductMinStockUpdate(BaseModel):
+    min_stock: int = Field(ge=0)
+
+
+class StockAlertResponse(BaseModel):
+    product_id: int
+    product_name: str
+    current_stock: int
+    min_stock: int
+    status: str
+    point_of_sale_id: Optional[int] = None
+
+
 class StudentAllergy(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     student_id: str = Field(foreign_key="student.id")
@@ -130,6 +211,63 @@ class StudentProductRule(SQLModel, table=True):
     student_id: str = Field(foreign_key="student.id")
     product_id: int = Field(foreign_key="product.id")
     mode: RestrictionMode = Field(default=RestrictionMode.BLOCK_LIST)
+
+
+class BalanceTopUpRequest(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    parent_id: int = Field(foreign_key="user.id")
+    total_amount: int
+    allocation_mode: BalanceAllocationMode = Field(default=BalanceAllocationMode.EQUAL)
+    allocations: Optional[str] = None  # JSON payload {student_id: amount}
+    payment_reference: Optional[str] = None
+    status: BalanceTopUpStatus = Field(default=BalanceTopUpStatus.PENDING)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    processed_at: Optional[datetime] = None
+
+
+class ScheduledOrder(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    student_id: str = Field(foreign_key="student.id")
+    parent_id: int = Field(foreign_key="user.id")
+    scheduled_for: date
+    status: ScheduledOrderStatus = Field(default=ScheduledOrderStatus.PENDING)
+    notes: Optional[str] = None
+    pay_from_balance: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ScheduledOrderItem(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    order_id: int = Field(foreign_key="scheduledorder.id")
+    product_id: int = Field(foreign_key="product.id")
+    quantity: int = Field(default=1)
+
+
+class DailyMenu(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    menu_date: date = Field(index=True, unique=True)
+    title: Optional[str] = None
+    description: Optional[str] = None
+    created_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class DailyMenuItem(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    menu_id: int = Field(foreign_key="dailymenu.id")
+    product_id: Optional[int] = Field(default=None, foreign_key="product.id")
+    name: str
+    meal_type: Optional[str] = None
+
+
+class StudentMenuSelection(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    parent_id: int = Field(foreign_key="user.id")
+    student_id: str = Field(foreign_key="student.id")
+    menu_item_id: int = Field(foreign_key="dailymenuitem.id")
+    menu_date: date
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 # Pydantic models for API
 class StudentCreate(BaseModel):
@@ -148,12 +286,15 @@ class ProductCreate(BaseModel):
     name: str
     price: int
     stock: int = 0
+    default_min_stock: int = 20
     allergens: List[AllergyType] = []
+
 
 class ProductUpdate(BaseModel):
     name: str
     price: int
     stock: int
+    default_min_stock: int = 20
     allergens: List[AllergyType] = []
 
 class RecognitionResult(BaseModel):
@@ -183,16 +324,41 @@ class UserCreate(BaseModel):
     email: str
     password: str
     full_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    dni: Optional[str] = None
+    phone: Optional[str] = None
     role: Role = Role.CAJERA
     point_of_sale_id: Optional[int] = None
+    is_active: bool = True
 
 
 class UserResponse(BaseModel):
     id: int
     email: str
     full_name: Optional[str]
+    first_name: Optional[str]
+    last_name: Optional[str]
+    dni: Optional[str]
+    phone: Optional[str]
     role: Role
     point_of_sale_id: Optional[int]
+    is_active: bool
+
+
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    dni: Optional[str] = None
+    phone: Optional[str] = None
+    role: Optional[Role] = None
+    point_of_sale_id: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class UserPasswordReset(BaseModel):
+    new_password: str
 
 
 class PointOfSaleCreate(BaseModel):
@@ -237,7 +403,163 @@ class StudentProductRulesRequest(BaseModel):
     allow_product_ids: List[int] = []
     block_product_ids: List[int] = []
 
+
+class ParentRegisterRequest(BaseModel):
+    email: str
+    password: str
+    first_name: str
+    last_name: str
+    dni: Optional[str] = None
+    phone: Optional[str] = None
+
+
+class ParentStudentAssignRequest(BaseModel):
+    student_ids: List[str]
+
+
+class ParentStudentLinkRequestCreate(BaseModel):
+    student_identifier: Optional[str] = None
+    student_name: str
+    student_grade: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ParentStudentLinkRequestResponse(BaseModel):
+    id: int
+    parent_id: int
+    student_identifier: Optional[str]
+    student_name: str
+    student_grade: Optional[str]
+    notes: Optional[str]
+    status: ParentStudentLinkStatus
+    admin_notes: Optional[str]
+    student_id: Optional[str]
+    created_at: datetime
+    processed_at: Optional[datetime]
+
+
+class ParentStudentLinkDecision(BaseModel):
+    student_id: Optional[str] = None
+    admin_notes: Optional[str] = None
+
+
+class BalanceTopUpCreate(BaseModel):
+    total_amount: int
+    allocation_mode: BalanceAllocationMode = BalanceAllocationMode.EQUAL
+    per_student_amounts: Optional[Dict[str, int]] = None
+    payment_reference: Optional[str] = None
+
+
+class BalanceTopUpResponse(BaseModel):
+    id: int
+    parent_id: int
+    total_amount: int
+    allocation_mode: BalanceAllocationMode
+    allocations: Dict[str, int]
+    payment_reference: Optional[str]
+    status: BalanceTopUpStatus
+    created_at: datetime
+    processed_at: Optional[datetime]
+
+
+class BalanceTopUpDecision(BaseModel):
+    payment_reference: Optional[str] = None
+
+
+class ScheduledOrderItemPayload(BaseModel):
+    product_id: int
+    quantity: int = 1
+
+
+class ScheduledOrderCreate(BaseModel):
+    student_id: str
+    scheduled_for: date
+    items: List[ScheduledOrderItemPayload]
+    notes: Optional[str] = None
+    pay_from_balance: bool = True
+
+
+class ScheduledOrderItemResponse(BaseModel):
+    id: int
+    product_id: int
+    product_name: Optional[str]
+    quantity: int
+
+
+class ScheduledOrderResponse(BaseModel):
+    id: int
+    student_id: str
+    parent_id: int
+    scheduled_for: date
+    status: ScheduledOrderStatus
+    notes: Optional[str]
+    pay_from_balance: bool
+    point_of_sale_id: Optional[int] = None
+    created_at: datetime
+    items: List[ScheduledOrderItemResponse]
+
+
+class DailyMenuItemInput(BaseModel):
+    product_id: Optional[int] = None
+    name: str
+    meal_type: Optional[str] = None
+
+
+class DailyMenuCreate(BaseModel):
+    menu_date: date
+    title: Optional[str] = None
+    description: Optional[str] = None
+    items: List[DailyMenuItemInput] = []
+
+
+class DailyMenuItemResponse(BaseModel):
+    id: int
+    product_id: Optional[int]
+    name: str
+    meal_type: Optional[str]
+
+
+class DailyMenuResponse(BaseModel):
+    id: int
+    menu_date: date
+    title: Optional[str]
+    description: Optional[str]
+    items: List[DailyMenuItemResponse]
+
+
+class StudentMenuSelectionCreate(BaseModel):
+    menu_item_id: int
+    student_id: str
+    notes: Optional[str] = None
+
+
+class StudentMenuSelectionResponse(BaseModel):
+    id: int
+    menu_item_id: int
+    student_id: str
+    parent_id: int
+    menu_date: date
+    notes: Optional[str]
+    created_at: datetime
+
 # Global variables
+LOCAL_TIMEZONE = os.getenv("LOCAL_TIMEZONE", "America/Asuncion")
+LOCAL_TZ = ZoneInfo(LOCAL_TIMEZONE)
+
+
+def localize_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(LOCAL_TZ)
+
+
+def localize_iso(value: Optional[datetime]) -> Optional[str]:
+    localized = localize_datetime(value)
+    return localized.isoformat() if localized else None
+
+
 app = FastAPI(title="Cantina Face Recognition System")
 face_engine = FaceEngine()
 
@@ -252,6 +574,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 # Base directories (absolute paths)
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+PARENTS_DIR = STATIC_DIR / "parents"
 
 # Database setup
 DATA_DIR = BASE_DIR / "data"
@@ -276,6 +599,45 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return pwd_context.verify(plain_password, hashed_password)
     except ValueError:
         return False
+
+
+def ensure_column_exists(table: str, column: str, definition: str) -> None:
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.execute(f"PRAGMA table_info({table})")
+            columns = [row[1] for row in cursor.fetchall()]
+            if column not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except sqlite3.OperationalError as exc:
+        print(f"[ensure_column_exists] warning: {exc}")
+
+
+def ensure_default_admin(email: str, password: str) -> None:
+    try:
+        with Session(engine) as session:
+            if session.exec(select(User).where(User.email == email)).first():
+                return
+            hashed = get_password_hash(password)
+            admin_user = User(
+                email=email,
+                full_name="Administrador",
+                role=Role.ADMIN,
+                hashed_password=hashed,
+                is_active=True,
+            )
+            session.add(admin_user)
+            session.commit()
+            print("[ensure_default_admin] admin@siloe.com.py creado")
+    except Exception as exc:
+        print(f"[ensure_default_admin] warning: {exc}")
+
+
+def initialize_legacy_data():
+    ensure_column_exists("user", "is_active", "INTEGER DEFAULT 1")
+    ensure_default_admin("admin@siloe.com.py", "admin321")
+
+
+initialize_legacy_data()
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -466,6 +828,16 @@ async def startup_event():
     ensure_column("transaction", "point_of_sale_id", "INTEGER")
     ensure_column("transaction", "cashier_id", "INTEGER")
     ensure_column("transaction", "quantity", "INTEGER NOT NULL DEFAULT 1")
+    ensure_column("productstock", "reserved_stock", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column("scheduledorder", "pay_from_balance", "INTEGER NOT NULL DEFAULT 1")
+    ensure_column("scheduledorder", "point_of_sale_id", "INTEGER")
+    ensure_column("balanceadjustment", "pay_from_balance", "INTEGER NOT NULL DEFAULT 1")
+    ensure_column("balanceadjustment", "point_of_sale_id", "INTEGER")
+    ensure_column("user", "first_name", "TEXT")
+    ensure_column("user", "last_name", "TEXT")
+    ensure_column("user", "dni", "TEXT")
+    ensure_column("user", "phone", "TEXT")
+    ensure_column("product", "category", "TEXT")
     init_hnsw_index()
     ensure_default_admin()
 
@@ -504,6 +876,37 @@ def get_or_create_product_stock(session: Session, product_id: int, point_of_sale
     return stock
 
 
+def sync_default_pos_stock(session: Session, product: Product):
+    """Ensure the default POS stock mirrors the product's stock."""
+    if not product or not product.id:
+        return
+
+    pos_id = DEFAULT_POS_ID
+    if not pos_id:
+        return
+
+    stock = session.exec(
+        select(ProductStock).where(
+            ProductStock.product_id == product.id,
+            ProductStock.point_of_sale_id == pos_id,
+        )
+    ).first()
+
+    if stock:
+        stock.current_stock = product.stock
+        stock.min_stock = product.default_min_stock
+        stock.updated_at = datetime.utcnow()
+        session.add(stock)
+    else:
+        new_stock = ProductStock(
+            product_id=product.id,
+            point_of_sale_id=pos_id,
+            current_stock=product.stock,
+            min_stock=product.default_min_stock,
+        )
+        session.add(new_stock)
+
+
 def serialize_product_stock(stock: ProductStock, product_name: str) -> ProductStockResponse:
     return ProductStockResponse(
         id=stock.id,
@@ -539,8 +942,51 @@ def serialize_product(product: Product) -> Dict[str, Optional[str]]:
         "name": product.name,
         "price": product.price,
         "stock": product.stock,
+        "default_min_stock": product.default_min_stock,
         "allergens": allergens,
+        "category": product.category.value if isinstance(product.category, ProductCategory) else product.category,
     }
+
+
+def serialize_user(user: User) -> UserResponse:
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        dni=user.dni,
+        phone=user.phone,
+        role=user.role,
+        point_of_sale_id=user.point_of_sale_id,
+        is_active=user.is_active,
+    )
+
+
+def serialize_link_request(record: ParentStudentLinkRequest) -> ParentStudentLinkRequestResponse:
+    return ParentStudentLinkRequestResponse(
+        id=record.id,
+        parent_id=record.parent_id,
+        student_identifier=record.student_identifier,
+        student_name=record.student_name,
+        student_grade=record.student_grade,
+        notes=record.notes,
+        status=record.status,
+        admin_notes=record.admin_notes,
+        student_id=record.student_id,
+        created_at=localize_datetime(record.created_at),
+        processed_at=localize_datetime(record.processed_at),
+    )
+
+
+def get_stock_status(current: int, minimum: int) -> str:
+    if minimum <= 0:
+        return "ok"
+    if current <= max(0, int(minimum * 0.25)):
+        return "critical"
+    if current < minimum:
+        return "low"
+    return "ok"
 
 
 def is_student_guardian(session: Session, parent_id: int, student_id: str) -> bool:
@@ -552,8 +998,26 @@ def is_student_guardian(session: Session, parent_id: int, student_id: str) -> bo
     ).first() is not None
 
 
+def link_parent_to_student(session: Session, parent_id: int, student_id: str):
+    if is_student_guardian(session, parent_id, student_id):
+        return
+    session.add(StudentGuardian(student_id=student_id, parent_user_id=parent_id))
+
+
+def get_parent_student_ids(session: Session, parent_id: int) -> List[str]:
+    links = session.exec(
+        select(StudentGuardian.student_id).where(StudentGuardian.parent_user_id == parent_id)
+    ).all()
+    return [link[0] if isinstance(link, tuple) else link for link in links]
+
+
+def ensure_parent_student(session: Session, parent_id: int, student_id: str):
+    if not is_student_guardian(session, parent_id, student_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Student not linked to parent")
+
+
 def ensure_student_access(session: Session, current_user: User, student_id: str):
-    if current_user.role == Role.ADMIN:
+    if current_user.role in (Role.ADMIN, Role.CAJERA, Role.STOCK):
         return
     if current_user.role == Role.PARENT and is_student_guardian(session, current_user.id, student_id):
         return
@@ -592,6 +1056,139 @@ def check_product_restrictions(
     return True, None
 
 
+def serialize_topup_request(record: BalanceTopUpRequest) -> BalanceTopUpResponse:
+    allocations = {}
+    if record.allocations:
+        try:
+            allocations = json.loads(record.allocations)
+        except json.JSONDecodeError:
+            allocations = {}
+    return BalanceTopUpResponse(
+        id=record.id,
+        parent_id=record.parent_id,
+        total_amount=record.total_amount,
+        allocation_mode=record.allocation_mode,
+        allocations=allocations,
+        payment_reference=record.payment_reference,
+        status=record.status,
+        created_at=record.created_at,
+        processed_at=record.processed_at,
+    )
+
+
+def serialize_scheduled_order(order: ScheduledOrder, items: List[ScheduledOrderItem], products: Dict[int, Product]) -> ScheduledOrderResponse:
+    item_payloads = []
+    for item in items:
+        product = products.get(item.product_id)
+        item_payloads.append(
+            ScheduledOrderItemResponse(
+                id=item.id,
+                product_id=item.product_id,
+                product_name=product.name if product else None,
+                quantity=item.quantity,
+            )
+        )
+    return ScheduledOrderResponse(
+        id=order.id,
+        student_id=order.student_id,
+        parent_id=order.parent_id,
+        scheduled_for=order.scheduled_for,
+        status=order.status,
+        notes=order.notes,
+        pay_from_balance=order.pay_from_balance,
+        created_at=localize_datetime(order.created_at),
+        items=item_payloads,
+    )
+
+
+def serialize_daily_menu(menu: DailyMenu, items: List[DailyMenuItem]) -> DailyMenuResponse:
+    return DailyMenuResponse(
+        id=menu.id,
+        menu_date=menu.menu_date,
+        title=menu.title,
+        description=menu.description,
+        items=[
+            DailyMenuItemResponse(
+                id=item.id,
+                product_id=item.product_id,
+                name=item.name,
+                meal_type=item.meal_type,
+            )
+            for item in items
+        ],
+    )
+
+
+def serialize_menu_selection(selection: StudentMenuSelection) -> StudentMenuSelectionResponse:
+    return StudentMenuSelectionResponse(
+        id=selection.id,
+        menu_item_id=selection.menu_item_id,
+        student_id=selection.student_id,
+        parent_id=selection.parent_id,
+        menu_date=selection.menu_date,
+        notes=selection.notes,
+        created_at=localize_datetime(selection.created_at),
+    )
+
+
+def compute_topup_allocations(
+    session: Session,
+    parent_id: int,
+    total_amount: int,
+    mode: BalanceAllocationMode,
+    per_student_amounts: Optional[Dict[str, int]] = None,
+) -> Dict[str, int]:
+    student_ids = get_parent_student_ids(session, parent_id)
+    if not student_ids:
+        raise HTTPException(status_code=400, detail="Parent has no students assigned")
+    if total_amount <= 0:
+        raise HTTPException(status_code=400, detail="Total amount must be positive")
+
+    allocations: Dict[str, int] = {}
+
+    if mode == BalanceAllocationMode.EQUAL:
+        base_amount = total_amount // len(student_ids)
+        remainder = total_amount % len(student_ids)
+        for idx, student_id in enumerate(student_ids):
+            allocations[student_id] = base_amount + (1 if idx < remainder else 0)
+    else:
+        if not per_student_amounts:
+            raise HTTPException(status_code=400, detail="Custom allocation requires per_student_amounts")
+        invalid_ids = [sid for sid in per_student_amounts.keys() if sid not in student_ids]
+        if invalid_ids:
+            raise HTTPException(status_code=400, detail=f"Invalid student ids: {', '.join(invalid_ids)}")
+        allocations = {sid: per_student_amounts.get(sid, 0) for sid in student_ids}
+        if sum(allocations.values()) != total_amount:
+            raise HTTPException(status_code=400, detail="Sum of custom allocations must equal total amount")
+
+    return allocations
+
+
+def process_link_request(
+    session: Session,
+    request: ParentStudentLinkRequest,
+    status: ParentStudentLinkStatus,
+    student_id: Optional[str] = None,
+    admin_notes: Optional[str] = None,
+):
+    if request.status != ParentStudentLinkStatus.PENDING:
+        raise HTTPException(status_code=400, detail="Request already processed")
+
+    if status == ParentStudentLinkStatus.APPROVED:
+        if not student_id:
+            raise HTTPException(status_code=400, detail="student_id is required to approve a request")
+        student = session.get(Student, student_id)
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+        link_parent_to_student(session, request.parent_id, student_id)
+        request.student_id = student_id
+
+    request.status = status
+    request.admin_notes = admin_notes
+    request.processed_at = datetime.utcnow()
+    session.add(request)
+
+
 @app.post("/auth/token", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     with Session(engine) as session:
@@ -612,32 +1209,77 @@ async def create_user(user_in: UserCreate, current_user: User = Depends(require_
         user = User(
             email=user_in.email,
             full_name=user_in.full_name,
+            first_name=user_in.first_name,
+            last_name=user_in.last_name,
+            dni=user_in.dni,
+            phone=user_in.phone,
             role=user_in.role,
             point_of_sale_id=user_in.point_of_sale_id,
+            is_active=user_in.is_active,
             hashed_password=get_password_hash(user_in.password),
         )
         session.add(user)
         session.commit()
         session.refresh(user)
 
-        return UserResponse(
-            id=user.id,
-            email=user.email,
-            full_name=user.full_name,
-            role=user.role,
-            point_of_sale_id=user.point_of_sale_id,
-        )
+        return serialize_user(user)
+
+
+@app.get("/auth/users", response_model=List[UserResponse])
+async def list_users(current_user: User = Depends(require_roles(Role.ADMIN))):
+    with Session(engine) as session:
+        users = session.exec(select(User)).all()
+        return [serialize_user(u) for u in users]
+
+
+@app.put("/auth/users/{user_id}", response_model=UserResponse)
+async def update_user(user_id: int, payload: UserUpdate, current_user: User = Depends(require_roles(Role.ADMIN))):
+    with Session(engine) as session:
+        user = session.get(User, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        if payload.full_name is not None:
+            user.full_name = payload.full_name
+        if payload.first_name is not None:
+            user.first_name = payload.first_name
+        if payload.last_name is not None:
+            user.last_name = payload.last_name
+        if payload.dni is not None:
+            user.dni = payload.dni
+        if payload.phone is not None:
+            user.phone = payload.phone
+        if payload.role is not None:
+            user.role = payload.role
+        if payload.point_of_sale_id is not None:
+            user.point_of_sale_id = payload.point_of_sale_id
+        if payload.is_active is not None:
+            user.is_active = payload.is_active
+
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+
+        return serialize_user(user)
+
+
+@app.post("/auth/users/{user_id}/reset-password")
+async def reset_user_password(user_id: int, payload: UserPasswordReset, current_user: User = Depends(require_roles(Role.ADMIN))):
+    with Session(engine) as session:
+        user = session.get(User, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        user.hashed_password = get_password_hash(payload.new_password)
+        session.add(user)
+        session.commit()
+
+        return {"message": "Password reset successfully", "user_id": user_id}
 
 
 @app.get("/auth/me", response_model=UserResponse)
 async def read_current_user(current_user: User = Depends(get_current_user)):
-    return UserResponse(
-        id=current_user.id,
-        email=current_user.email,
-        full_name=current_user.full_name,
-        role=current_user.role,
-        point_of_sale_id=current_user.point_of_sale_id,
-    )
+    return serialize_user(current_user)
 
 
 @app.post("/api/points-of-sale", response_model=PointOfSaleResponse)
@@ -658,6 +1300,52 @@ async def list_points_of_sale(current_user: User = Depends(require_roles(Role.AD
     with Session(engine) as session:
         points = session.exec(select(PointOfSale)).all()
         return [PointOfSaleResponse(id=p.id, name=p.name, location=p.location) for p in points]
+
+
+@app.get("/api/stock/alerts", response_model=List[StockAlertResponse])
+async def stock_alerts(current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK))):
+    with Session(engine) as session:
+        query = select(ProductStock, Product).join(Product, Product.id == ProductStock.product_id)
+        rows = session.exec(query).all()
+
+        alerts: List[StockAlertResponse] = []
+        for stock, product in rows:
+            status = get_stock_status(stock.current_stock, stock.min_stock or product.default_min_stock)
+            alerts.append(
+                StockAlertResponse(
+                    product_id=product.id,
+                    product_name=product.name,
+                    current_stock=stock.current_stock,
+                    min_stock=stock.min_stock,
+                    status=status,
+                    point_of_sale_id=stock.point_of_sale_id,
+                )
+            )
+
+        return alerts
+
+
+@app.put("/api/products/{product_id}/min-stock", response_model=Dict[str, Any])
+async def update_product_min_stock(
+    product_id: int,
+    payload: ProductMinStockUpdate,
+    current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK))
+):
+    with Session(engine) as session:
+        product = session.get(Product, product_id)
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        product.default_min_stock = payload.min_stock
+        session.add(product)
+        session.commit()
+        session.refresh(product)
+
+        return {
+            "product_id": product.id,
+            "default_min_stock": product.default_min_stock,
+            "message": "Minimum stock updated",
+        }
 
 
 @app.post("/api/stock", response_model=ProductStockResponse)
@@ -735,18 +1423,23 @@ async def create_product(product: ProductCreate, current_user: User = Depends(re
             name=product.name,
             price=product.price,
             stock=product.stock,
+            default_min_stock=product.default_min_stock,
             allergens=json.dumps([a.value for a in product.allergens]) if product.allergens else None,
         )
         
         session.add(new_product)
         session.commit()
         session.refresh(new_product)
-        
+
+        sync_default_pos_stock(session, new_product)
+        session.commit()
+
         return {
             "id": new_product.id,
             "name": new_product.name,
             "price": new_product.price,
             "stock": new_product.stock,
+            "default_min_stock": new_product.default_min_stock,
             "message": "Product created successfully",
         }
 
@@ -761,9 +1454,521 @@ async def list_products():
                 "name": p.name,
                 "price": p.price,
                 "stock": p.stock,
+                "default_min_stock": p.default_min_stock,
             }
             for p in products
         ]
+
+
+@app.post("/api/parents/topups", response_model=BalanceTopUpResponse)
+async def create_parent_topup(
+    payload: BalanceTopUpCreate,
+    current_user: User = Depends(require_roles(Role.PARENT))
+):
+    with Session(engine) as session:
+        allocations = compute_topup_allocations(
+            session,
+            current_user.id,
+            payload.total_amount,
+            payload.allocation_mode,
+            payload.per_student_amounts,
+        )
+
+        record = BalanceTopUpRequest(
+            parent_id=current_user.id,
+            total_amount=payload.total_amount,
+            allocation_mode=payload.allocation_mode,
+            allocations=json.dumps(allocations),
+            payment_reference=payload.payment_reference,
+        )
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return serialize_topup_request(record)
+
+
+@app.get("/api/parents/topups", response_model=List[BalanceTopUpResponse])
+async def list_parent_topups(current_user: User = Depends(require_roles(Role.PARENT))):
+    with Session(engine) as session:
+        records = session.exec(
+            select(BalanceTopUpRequest)
+            .where(BalanceTopUpRequest.parent_id == current_user.id)
+            .order_by(BalanceTopUpRequest.created_at.desc())
+        ).all()
+        return [serialize_topup_request(record) for record in records]
+
+
+@app.get("/api/topups", response_model=List[BalanceTopUpResponse])
+async def list_all_topups(current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK))):
+    with Session(engine) as session:
+        records = session.exec(
+            select(BalanceTopUpRequest).order_by(BalanceTopUpRequest.created_at.desc())
+        ).all()
+        return [serialize_topup_request(record) for record in records]
+
+
+def _process_topup(
+    session: Session,
+    topup: BalanceTopUpRequest,
+    status: BalanceTopUpStatus,
+    payment_reference: Optional[str] = None,
+):
+    if topup.status != BalanceTopUpStatus.PENDING:
+        raise HTTPException(status_code=400, detail="Top-up already processed")
+
+    if payment_reference:
+        topup.payment_reference = payment_reference
+
+    if status == BalanceTopUpStatus.APPROVED:
+        allocations_raw = topup.allocations or "{}"
+        try:
+            allocations = json.loads(allocations_raw)
+            if not isinstance(allocations, dict):
+                allocations = {}
+        except json.JSONDecodeError:
+            allocations = {}
+        for student_id, amount in allocations.items():
+            student = session.get(Student, student_id)
+            if not student:
+                continue
+            student.balance += int(amount)
+            session.add(student)
+            session.add(BalanceAdjustment(student_id=student_id, amount=int(amount)))
+
+    topup.status = status
+    topup.processed_at = datetime.utcnow()
+    session.add(topup)
+
+
+@app.post("/api/topups/{topup_id}/approve", response_model=BalanceTopUpResponse)
+async def approve_topup(
+    topup_id: int,
+    payload: BalanceTopUpDecision,
+    current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK))
+):
+    with Session(engine) as session:
+        topup = session.get(BalanceTopUpRequest, topup_id)
+        if not topup:
+            raise HTTPException(status_code=404, detail="Top-up request not found")
+
+        _process_topup(session, topup, BalanceTopUpStatus.APPROVED, payload.payment_reference)
+        session.commit()
+        session.refresh(topup)
+        return serialize_topup_request(topup)
+
+
+@app.post("/api/topups/{topup_id}/reject", response_model=BalanceTopUpResponse)
+async def reject_topup(
+    topup_id: int,
+    payload: BalanceTopUpDecision,
+    current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK))
+):
+    with Session(engine) as session:
+        topup = session.get(BalanceTopUpRequest, topup_id)
+        if not topup:
+            raise HTTPException(status_code=404, detail="Top-up request not found")
+
+        _process_topup(session, topup, BalanceTopUpStatus.REJECTED, payload.payment_reference)
+        session.commit()
+        session.refresh(topup)
+        return serialize_topup_request(topup)
+
+
+@app.post("/api/parents/scheduled-orders", response_model=ScheduledOrderResponse)
+async def create_scheduled_order(
+    payload: ScheduledOrderCreate,
+    current_user: User = Depends(require_roles(Role.PARENT))
+):
+    if payload.scheduled_for < date.today():
+        raise HTTPException(status_code=400, detail="Scheduled date must be today or later")
+
+    with Session(engine) as session:
+        ensure_parent_student(session, current_user.id, payload.student_id)
+
+        product_ids = {item.product_id for item in payload.items}
+        products = session.exec(select(Product).where(Product.id.in_(product_ids))).all()
+        product_map = {product.id: product for product in products}
+        missing = [pid for pid in product_ids if pid not in product_map]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Products not found: {', '.join(map(str, missing))}")
+
+        order = ScheduledOrder(
+            student_id=payload.student_id,
+            parent_id=current_user.id,
+            scheduled_for=payload.scheduled_for,
+            notes=payload.notes,
+            pay_from_balance=payload.pay_from_balance,
+        )
+        session.add(order)
+        session.commit()
+        session.refresh(order)
+
+        items: List[ScheduledOrderItem] = []
+        for item in payload.items:
+            order_item = ScheduledOrderItem(
+                order_id=order.id,
+                product_id=item.product_id,
+                quantity=max(1, item.quantity),
+            )
+            session.add(order_item)
+            items.append(order_item)
+        session.commit()
+
+        products_dict = {product.id: product for product in products}
+        return serialize_scheduled_order(order, items, products_dict)
+
+
+@app.get("/api/parents/scheduled-orders", response_model=List[ScheduledOrderResponse])
+async def list_parent_scheduled_orders(current_user: User = Depends(require_roles(Role.PARENT))):
+    with Session(engine) as session:
+        orders = session.exec(
+            select(ScheduledOrder)
+            .where(ScheduledOrder.parent_id == current_user.id)
+            .order_by(ScheduledOrder.scheduled_for.asc())
+        ).all()
+
+        order_ids = [order.id for order in orders]
+        items = (
+            session.exec(select(ScheduledOrderItem).where(ScheduledOrderItem.order_id.in_(order_ids))).all()
+            if order_ids
+            else []
+        )
+        product_ids = {item.product_id for item in items}
+        products = {
+            product.id: product
+            for product in session.exec(select(Product).where(Product.id.in_(product_ids))).all()
+        } if product_ids else {}
+
+        items_by_order: Dict[int, List[ScheduledOrderItem]] = {}
+        for item in items:
+            items_by_order.setdefault(item.order_id, []).append(item)
+
+        return [serialize_scheduled_order(order, items_by_order.get(order.id, []), products) for order in orders]
+
+
+@app.get("/api/students/{student_id}/scheduled-orders", response_model=List[ScheduledOrderResponse])
+async def list_student_scheduled_orders(
+    student_id: str,
+    status_filter: Optional[ScheduledOrderStatus] = Query(None),
+    current_user: User = Depends(get_current_user)
+):
+    with Session(engine) as session:
+        student = session.get(Student, student_id)
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        ensure_student_access(session, current_user, student_id)
+
+        query = select(ScheduledOrder).where(ScheduledOrder.student_id == student_id)
+        if status_filter:
+            query = query.where(ScheduledOrder.status == status_filter)
+        orders = session.exec(query.order_by(ScheduledOrder.scheduled_for.asc())).all()
+
+        order_ids = [order.id for order in orders]
+        items = (
+            session.exec(select(ScheduledOrderItem).where(ScheduledOrderItem.order_id.in_(order_ids))).all()
+            if order_ids
+            else []
+        )
+        product_ids = {item.product_id for item in items}
+        products = {
+            product.id: product
+            for product in session.exec(select(Product).where(Product.id.in_(product_ids))).all()
+        } if product_ids else {}
+
+        items_by_order: Dict[int, List[ScheduledOrderItem]] = {}
+        for item in items:
+            items_by_order.setdefault(item.order_id, []).append(item)
+
+        return [serialize_scheduled_order(order, items_by_order.get(order.id, []), products) for order in orders]
+
+
+@app.post("/api/scheduled-orders/{order_id}/dispatch", response_model=ScheduledOrderResponse)
+async def dispatch_scheduled_order(
+    order_id: int,
+    current_user: User = Depends(require_roles(Role.ADMIN, Role.CAJERA))
+):
+    with Session(engine) as session:
+        order = session.get(ScheduledOrder, order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail="Scheduled order not found")
+
+        if order.status != ScheduledOrderStatus.PENDING:
+            raise HTTPException(status_code=400, detail="Scheduled order already processed")
+
+        items = session.exec(select(ScheduledOrderItem).where(ScheduledOrderItem.order_id == order.id)).all()
+        product_ids = {item.product_id for item in items}
+        products = {
+            product.id: product
+            for product in session.exec(select(Product).where(Product.id.in_(product_ids))).all()
+        } if product_ids else {}
+
+        if order.pay_from_balance:
+            student = session.get(Student, order.student_id)
+            if not student:
+                raise HTTPException(status_code=404, detail="Student not found")
+
+            total_amount = 0
+            for item in items:
+                product = products.get(item.product_id)
+                if not product:
+                    raise HTTPException(status_code=404, detail="Product not found for scheduled order item")
+                total_amount += product.price * item.quantity
+
+            if student.balance < total_amount:
+                raise HTTPException(status_code=400, detail="Saldo insuficiente para este pedido programado")
+
+            student.balance -= total_amount
+            session.add(student)
+            session.add(BalanceAdjustment(student_id=student.id, amount=-total_amount))
+
+        order.status = ScheduledOrderStatus.DISPATCHED
+        session.add(order)
+        session.commit()
+
+        return serialize_scheduled_order(order, items, products)
+
+
+@app.post("/api/daily-menu", response_model=DailyMenuResponse)
+async def upsert_daily_menu(
+    payload: DailyMenuCreate,
+    current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK))
+):
+    with Session(engine) as session:
+        menu = session.exec(select(DailyMenu).where(DailyMenu.menu_date == payload.menu_date)).first()
+        if menu:
+            menu.title = payload.title
+            menu.description = payload.description
+        else:
+            menu = DailyMenu(
+                menu_date=payload.menu_date,
+                title=payload.title,
+                description=payload.description,
+                created_by=current_user.id,
+            )
+            session.add(menu)
+            session.commit()
+            session.refresh(menu)
+
+        session.exec(delete(DailyMenuItem).where(DailyMenuItem.menu_id == menu.id))
+        session.commit()
+
+        for item in payload.items:
+            menu_item = DailyMenuItem(
+                menu_id=menu.id,
+                product_id=item.product_id,
+                name=item.name,
+                meal_type=item.meal_type,
+            )
+            session.add(menu_item)
+        session.commit()
+
+        items = session.exec(select(DailyMenuItem).where(DailyMenuItem.menu_id == menu.id)).all()
+        return serialize_daily_menu(menu, items)
+
+
+@app.get("/api/daily-menu", response_model=List[DailyMenuResponse])
+async def list_daily_menu(
+    start: Optional[date] = Query(None),
+    end: Optional[date] = Query(None),
+    current_user: User = Depends(get_current_user)
+):
+    if not start:
+        start = date.today()
+    if not end:
+        end = start + timedelta(days=14)
+
+    with Session(engine) as session:
+        menus = session.exec(
+            select(DailyMenu)
+            .where(DailyMenu.menu_date >= start, DailyMenu.menu_date <= end)
+            .order_by(DailyMenu.menu_date.asc())
+        ).all()
+        menu_ids = [menu.id for menu in menus]
+        items = (
+            session.exec(select(DailyMenuItem).where(DailyMenuItem.menu_id.in_(menu_ids))).all()
+            if menu_ids
+            else []
+        )
+        items_by_menu: Dict[int, List[DailyMenuItem]] = {}
+        for item in items:
+            items_by_menu.setdefault(item.menu_id, []).append(item)
+
+        return [serialize_daily_menu(menu, items_by_menu.get(menu.id, [])) for menu in menus]
+
+
+@app.post("/api/daily-menu/{menu_id}/selections", response_model=StudentMenuSelectionResponse)
+async def create_menu_selection(
+    menu_id: int,
+    payload: StudentMenuSelectionCreate,
+    current_user: User = Depends(require_roles(Role.PARENT))
+):
+    with Session(engine) as session:
+        menu = session.get(DailyMenu, menu_id)
+        if not menu:
+            raise HTTPException(status_code=404, detail="Menu not found")
+
+        ensure_parent_student(session, current_user.id, payload.student_id)
+
+        menu_item = session.get(DailyMenuItem, payload.menu_item_id)
+        if not menu_item or menu_item.menu_id != menu_id:
+            raise HTTPException(status_code=400, detail="Menu item does not belong to this menu")
+
+        selection = StudentMenuSelection(
+            parent_id=current_user.id,
+            student_id=payload.student_id,
+            menu_item_id=payload.menu_item_id,
+            menu_date=menu.menu_date,
+            notes=payload.notes,
+        )
+        session.add(selection)
+        session.commit()
+        session.refresh(selection)
+        return serialize_menu_selection(selection)
+
+
+@app.get("/api/parents/menu-selections", response_model=List[StudentMenuSelectionResponse])
+async def list_parent_menu_selections(current_user: User = Depends(require_roles(Role.PARENT))):
+    with Session(engine) as session:
+        selections = session.exec(
+            select(StudentMenuSelection)
+            .where(StudentMenuSelection.parent_id == current_user.id)
+            .order_by(StudentMenuSelection.menu_date.desc())
+        ).all()
+        return [serialize_menu_selection(selection) for selection in selections]
+@app.post("/api/parents/register", response_model=UserResponse)
+async def parent_register(payload: ParentRegisterRequest):
+    with Session(engine) as session:
+        if get_user_by_email(session, payload.email):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
+
+        user = User(
+            email=payload.email,
+            full_name=f"{payload.first_name} {payload.last_name}".strip(),
+            first_name=payload.first_name,
+            last_name=payload.last_name,
+            dni=payload.dni,
+            phone=payload.phone,
+            role=Role.PARENT,
+            hashed_password=get_password_hash(payload.password),
+            is_active=True,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return serialize_user(user)
+
+
+@app.post("/api/parents/{parent_id}/students")
+async def assign_students_to_parent(
+    parent_id: int,
+    payload: ParentStudentAssignRequest,
+    current_user: User = Depends(require_roles(Role.ADMIN))
+):
+    with Session(engine) as session:
+        parent = session.get(User, parent_id)
+        if not parent or parent.role != Role.PARENT:
+            raise HTTPException(status_code=404, detail="Parent not found")
+
+        students = session.exec(select(Student).where(Student.id.in_(payload.student_ids))).all()
+        found_ids = {s.id for s in students}
+        missing = [sid for sid in payload.student_ids if sid not in found_ids]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Students not found: {', '.join(missing)}")
+
+        existing_links = session.exec(
+            select(StudentGuardian).where(
+                StudentGuardian.parent_user_id == parent_id,
+                StudentGuardian.student_id.in_(payload.student_ids)
+            )
+        ).all()
+        existing_pairs = {(link.student_id, link.parent_user_id) for link in existing_links}
+
+        for student_id in payload.student_ids:
+            if (student_id, parent_id) in existing_pairs:
+                continue
+            session.add(StudentGuardian(student_id=student_id, parent_user_id=parent_id))
+
+        session.commit()
+
+        return {
+            "parent_id": parent_id,
+            "student_ids": payload.student_ids,
+            "assigned": len(payload.student_ids) - len(existing_pairs),
+        }
+
+
+@app.post("/api/parents/link-requests", response_model=ParentStudentLinkRequestResponse)
+async def create_link_request(
+    payload: ParentStudentLinkRequestCreate,
+    current_user: User = Depends(require_roles(Role.PARENT))
+):
+    with Session(engine) as session:
+        request = ParentStudentLinkRequest(
+            parent_id=current_user.id,
+            student_identifier=payload.student_identifier,
+            student_name=payload.student_name,
+            student_grade=payload.student_grade,
+            notes=payload.notes,
+        )
+        session.add(request)
+        session.commit()
+        session.refresh(request)
+        return serialize_link_request(request)
+
+
+@app.get("/api/parents/link-requests", response_model=List[ParentStudentLinkRequestResponse])
+async def list_parent_link_requests(current_user: User = Depends(require_roles(Role.PARENT))):
+    with Session(engine) as session:
+        requests = session.exec(
+            select(ParentStudentLinkRequest)
+            .where(ParentStudentLinkRequest.parent_id == current_user.id)
+            .order_by(ParentStudentLinkRequest.created_at.desc())
+        ).all()
+        return [serialize_link_request(r) for r in requests]
+
+
+@app.get("/api/link-requests", response_model=List[ParentStudentLinkRequestResponse])
+async def list_all_link_requests(current_user: User = Depends(require_roles(Role.ADMIN))):
+    with Session(engine) as session:
+        requests = session.exec(
+            select(ParentStudentLinkRequest).order_by(ParentStudentLinkRequest.created_at.desc())
+        ).all()
+        return [serialize_link_request(r) for r in requests]
+
+
+@app.post("/api/link-requests/{request_id}/approve", response_model=ParentStudentLinkRequestResponse)
+async def approve_link_request(
+    request_id: int,
+    payload: ParentStudentLinkDecision,
+    current_user: User = Depends(require_roles(Role.ADMIN))
+):
+    with Session(engine) as session:
+        request = session.get(ParentStudentLinkRequest, request_id)
+        if not request:
+            raise HTTPException(status_code=404, detail="Request not found")
+
+        process_link_request(session, request, ParentStudentLinkStatus.APPROVED, payload.student_id, payload.admin_notes)
+        session.commit()
+        session.refresh(request)
+        return serialize_link_request(request)
+
+
+@app.post("/api/link-requests/{request_id}/reject", response_model=ParentStudentLinkRequestResponse)
+async def reject_link_request(
+    request_id: int,
+    payload: ParentStudentLinkDecision,
+    current_user: User = Depends(require_roles(Role.ADMIN))
+):
+    with Session(engine) as session:
+        request = session.get(ParentStudentLinkRequest, request_id)
+        if not request:
+            raise HTTPException(status_code=404, detail="Request not found")
+
+        process_link_request(session, request, ParentStudentLinkStatus.REJECTED, admin_notes=payload.admin_notes)
+        session.commit()
+        session.refresh(request)
+        return serialize_link_request(request)
 
 
 @app.get("/api/parents/students", response_model=List[StudentResponse])
@@ -951,26 +2156,40 @@ async def get_student_detail(student_id: str):
         }
 
 @app.put("/api/products/{product_id}")
-async def update_product(product_id: int, product: ProductUpdate, current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK))):
+async def update_product(
+    product_id: int,
+    product: ProductUpdate,
+    current_user: User = Depends(require_roles(Role.ADMIN, Role.STOCK, Role.CAJERA))
+):
     """Update an existing product (name, price, stock)."""
     with Session(engine) as session:
         db_product = session.get(Product, product_id)
         if not db_product:
             raise HTTPException(status_code=404, detail="Product not found")
 
-        db_product.name = product.name
-        db_product.price = product.price
+        if current_user.role in (Role.ADMIN, Role.STOCK):
+            db_product.name = product.name
+            db_product.price = product.price
+            db_product.allergens = json.dumps([a.value for a in product.allergens]) if product.allergens else None
+        else:
+            # Cajeras solo pueden ajustar stock y mínimo; ignorar cambios en otros campos
+            product.stock = product.stock  # keep for clarity
+
         db_product.stock = product.stock
-        db_product.allergens = json.dumps([a.value for a in product.allergens]) if product.allergens else None
+        db_product.default_min_stock = product.default_min_stock
         session.add(db_product)
         session.commit()
         session.refresh(db_product)
+
+        sync_default_pos_stock(session, db_product)
+        session.commit()
 
         return {
             "id": db_product.id,
             "name": db_product.name,
             "price": db_product.price,
             "stock": db_product.stock,
+            "default_min_stock": db_product.default_min_stock,
         }
 
 @app.post("/api/seed")
@@ -1500,7 +2719,7 @@ async def get_student_transactions(student_id: str):
                 "id": t[0].id,
                 "product_name": t[1].name,
                 "amount": t[0].amount,
-                "created_at": t[0].created_at.isoformat()
+                "created_at": localize_iso(t[0].created_at)
             }
             for t in transactions
         ]
@@ -1584,13 +2803,43 @@ async def add_student_credits(student_id: str, request: dict):
         
         student.balance += amount
         session.add(student)
+
+        adjustment = BalanceAdjustment(student_id=student_id, amount=amount)
+        session.add(adjustment)
         session.commit()
+        session.refresh(adjustment)
         
         return {
             "success": True,
             "new_balance": student.balance,
-            "added_amount": amount
+            "added_amount": amount,
+            "logged_at": localize_iso(adjustment.created_at),
         }
+
+
+@app.get("/api/students/{student_id}/credit-history")
+async def get_credit_history(student_id: str, limit: int = 25):
+    """Return the latest balance adjustments for a student"""
+    with Session(engine) as session:
+        student = session.get(Student, student_id)
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        history = session.exec(
+            select(BalanceAdjustment)
+            .where(BalanceAdjustment.student_id == student_id)
+            .order_by(BalanceAdjustment.created_at.desc())
+            .limit(limit)
+        ).all()
+
+        return [
+            {
+                "id": entry.id,
+                "amount": entry.amount,
+                "created_at": localize_iso(entry.created_at),
+            }
+            for entry in history
+        ]
 
 @app.put("/api/students/{student_id}")
 async def update_student(
@@ -1720,6 +2969,12 @@ async def charge_student(
             raise HTTPException(status_code=400, detail="Point of sale must be specified")
 
         stock_record = get_or_create_product_stock(session, product.id, pos_id)
+        if stock_record.current_stock < quantity and pos_id == DEFAULT_POS_ID and product.stock >= quantity:
+            # Re-sync default POS stock if product stock was updated but POS stock lagged behind
+            stock_record.current_stock = product.stock
+            stock_record.updated_at = datetime.utcnow()
+            session.add(stock_record)
+
         if stock_record.current_stock < quantity:
             raise HTTPException(status_code=400, detail="Insufficient stock at this point of sale")
 
@@ -1739,6 +2994,11 @@ async def charge_student(
         stock_record.current_stock -= quantity
         stock_record.updated_at = datetime.utcnow()
         session.add(stock_record)
+
+        # Keep product table stock in sync for admin view / reporting
+        if product.stock is not None:
+            product.stock = max(0, product.stock - quantity)
+            session.add(product)
 
         # Log transaction
         transaction = Transaction(
@@ -1814,7 +3074,7 @@ async def list_transactions(
                 "payment_method": t.payment_method,
                 "point_of_sale_id": t.point_of_sale_id,
                 "cashier_id": t.cashier_id,
-                "created_at": t.created_at.isoformat(),
+                "created_at": localize_iso(t.created_at),
             }
             for (t, s, p) in rows
         ]
@@ -1850,20 +3110,30 @@ async def analytics_summary(
         rows = session.exec(query).all()
 
         if not rows:
-            return {
+            empty_summary = {
                 "top_products": [],
                 "top_students": [],
                 "daily_sales": [],
+                "summary": {
+                    "total_sales": 0,
+                    "total_transactions": 0,
+                    "average_ticket": 0,
+                    "unique_students": 0,
+                    "best_day": None,
+                },
             }
+            return empty_summary
 
         product_stats = {}
         student_stats = {}
         daily_stats = {}
+        total_sales_amount = 0
 
         for t, s, p in rows:
             pid = p.id
             sid = s.id
             day = t.created_at.date().isoformat()
+            total_sales_amount += t.amount
 
             if pid not in product_stats:
                 product_stats[pid] = {
@@ -1908,10 +3178,26 @@ async def analytics_summary(
 
         daily_sales = sorted(daily_stats.values(), key=lambda x: x["date"])
 
+        total_transactions = len(rows)
+        unique_students = len(student_stats)
+        average_ticket = (
+            total_sales_amount / total_transactions if total_transactions else 0
+        )
+        best_day = (
+            max(daily_sales, key=lambda x: x["total_amount"]) if daily_sales else None
+        )
+
         return {
             "top_products": top_products,
             "top_students": top_students,
             "daily_sales": daily_sales,
+            "summary": {
+                "total_sales": total_sales_amount,
+                "total_transactions": total_transactions,
+                "average_ticket": average_ticket,
+                "unique_students": unique_students,
+                "best_day": best_day,
+            },
         }
 
 # Serve data directory for faces and other assets
@@ -1922,6 +3208,10 @@ app.mount("/data", StaticFiles(directory=str(DATA_DIR)), name="data")
 async def sales_page():
     """Dedicated sales page route"""
     return FileResponse(STATIC_DIR / "sales.html")
+
+
+if PARENTS_DIR.exists():
+    app.mount("/parents", StaticFiles(directory=str(PARENTS_DIR), html=True), name="parents")
 
 
 # Mount static files (absolute path to avoid CWD issues)

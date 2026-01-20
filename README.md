@@ -25,22 +25,17 @@ Sistema completo de cantina escolar offline con reconocimiento facial y respaldo
 ### Instalación
 
 1. **Clona o descarga** el proyecto
-2. **Ejecuta el script de configuración**:
+2. **Prepara y ejecuta los scripts**:
    ```bash
-   # Linux/Mac
-   ./run.sh
+   chmod +x setup.sh run.sh
+   ./setup.sh   # crea/activa venv e instala dependencias
+   ./run.sh     # activa el venv y arranca uvicorn
 
    # Windows
    run.bat
    ```
 
-   Esto hará:
-   - Crear entorno virtual
-   - Instalar todas las dependencias
-   - Descargar modelo ArcFace (primera ejecución)
-   - Iniciar el servidor
-
-3. **Abre tu navegador** y ve a: `http://localhost:8000/static/index.html`
+3. **Abre tu navegador** y ve a: `http://localhost:8000/login.html` para iniciar sesión antes de usar `index.html`
 
 ## Quick Start
 
@@ -53,22 +48,47 @@ Sistema completo de cantina escolar offline con reconocimiento facial y respaldo
 ### Installation
 
 1. **Clone or download** the project
-2. **Run the setup script**:
+2. **Prepare and run the helper scripts**:
    ```bash
-   # Linux/Mac
-   ./run.sh
+   chmod +x setup.sh run.sh
+   ./setup.sh   # creates the venv and installs deps
+   ./run.sh     # starts uvicorn inside the venv
 
    # Windows
    run.bat
    ```
 
-   This will:
-   - Create a virtual environment
-   - Install all dependencies
-   - Download the ArcFace model (first run only)
-   - Start the server
+3. **Open your browser** and head to `http://localhost:8000/login.html` first, then continue in `index.html`/`admin.html` once authenticated.
 
-3. **Open your browser** and go to: `http://localhost:8000/static/index.html`
+## Acceso y Autenticación
+
+1. Dirígete a `http://localhost:8000/login.html`.
+2. Ingresa el usuario y contraseña del personal (el sistema crea `admin@siloe.com.py / admin321` si no existe).
+3. Tras iniciar sesión se guarda un token JWT en `localStorage` y se redirige a la última página solicitada.
+4. Usa los botones "Cerrar sesión" en `index.html` o `admin.html` para limpiar el token y volver a la pantalla de login.
+
+> Si el token expira o se borra, cualquier visita a `index.html`/`admin.html` redireccionará automáticamente a la pantalla de acceso.
+
+## Chromebook / ChromeOS (Instalador Local)
+
+1. **Activa Linux (Beta)** en *Configuración → Avanzado → Desarrolladores → Linux* y establece al menos 10 GB de espacio.
+2. **Copia la carpeta del proyecto** (por USB, Drive o Git) dentro de `Archivos → Linux`.
+3. **Abre la terminal de Linux** y marca los scripts como ejecutables:
+   ```bash
+   chmod +x setup.sh run.sh
+   ```
+4. **Ejecuta la preparación** (solo la primera vez o cuando cambien dependencias):
+   ```bash
+   ./setup.sh
+   ```
+   Esto crea el entorno virtual y corre `pip install -r requirements.txt` dentro del contenedor de Linux.
+5. **Arranca el servidor local** cada vez que quieras usar la app:
+   ```bash
+   ./run.sh
+   ```
+   El script activa el entorno virtual y lanza `uvicorn app:app --reload`.
+6. **Abre el navegador de ChromeOS** en `http://localhost:8000/login.html`, inicia sesión y luego navega a `index.html` o `admin.html`.
+7. **Detén el servidor** con `Ctrl+C` en la terminal cuando termines.
 
 ## Guía de Uso
 

@@ -9,6 +9,7 @@
 <body class="sales-view">
     <div id="status-bar">
         <div class="status-left">
+            <img src="/siloe-logo-blanco.png" alt="Cantina Face" class="status-logo" />
             <span><strong>Vista:</strong> Ventas</span>
             <span id="active-student-status">Cuenta: <span id="active-student-name">Ninguna</span></span>
         </div>
@@ -38,6 +39,30 @@
                     <button class="product-btn" disabled>9</button>
                 </div>
             </div>
+
+            <div id="scheduled-orders-panel" class="panel scheduled-panel hidden">
+                <div class="panel-header">
+                    <h4>Pedidos programados</h4>
+                    <p>Listo para despachar</p>
+                </div>
+                <div id="scheduled-orders-list" class="scheduled-list">
+                    <p class="muted">Seleccioná un alumno para ver pedidos.</p>
+                </div>
+            </div>
+
+            <div id="dispatch-panel" class="dispatch-panel hidden">
+                <div class="panel-header">
+                    <h4>Productos entregados</h4>
+                    <p>Marca cada producto cuando lo entregues</p>
+                </div>
+                <div id="dispatch-list" class="dispatch-list">
+                    <p class="muted">Sin productos cargados</p>
+                </div>
+                <div class="dispatch-actions">
+                    <button id="dispatch-add-btn" class="primary-btn">Agregar producto</button>
+                    <button id="dispatch-clear-btn" class="secondary-btn">¡Listo!</button>
+                </div>
+            </div>
         </div>
 
         <div id="sales-right">
@@ -60,13 +85,30 @@
                 <div id="cart-items"></div>
                 <p class="cart-total-row"><strong>Total:</strong> <span id="cart-total">0</span> <span id="currency">Gs.</span></p>
                 <div id="manual-charge" class="hidden">
-                    <button id="charge-btn" title="Enter">Cobrar Todo</button>
+                    <button id="charge-btn" title="Enter">Cobrar de saldo</button>
+                    <button id="manual-charge-btn" class="secondary-btn">Cobrar manualmente</button>
                 </div>
             </div>
         </div>
     </div>
 
     <div id="notifications"></div>
+
+    <div id="manual-charge-modal" class="manual-modal hidden">
+        <div class="manual-modal-content">
+            <h3>Cobro manual</h3>
+            <p>Total a cobrar: <strong id="manual-total">0 Gs.</strong></p>
+            <div class="cash-options" id="cash-options"></div>
+            <button id="manual-exact-btn" class="secondary-btn">Usar monto exacto</button>
+            <label for="manual-cash-input">Monto entregado (Gs.)</label>
+            <input type="number" id="manual-cash-input" min="0" step="500" placeholder="0" />
+            <p>Vuelto: <strong id="manual-change-output">0 Gs.</strong></p>
+            <div class="modal-actions">
+                <button id="manual-charge-confirm" class="primary-btn">Confirmar cobro</button>
+                <button id="manual-charge-cancel" class="secondary-btn">Cancelar</button>
+            </div>
+        </div>
+    </div>
 
     <script src="/sales.js"></script>
 </body>

@@ -12,19 +12,21 @@
     <!-- Barra Superior de Estado -->
     <div id="status-bar">
         <div class="status-left">
+            <img src="/siloe-logo-blanco.png" alt="Cantina Face" class="status-logo" />
             <span id="camera-status">Cámara: <span class="status-indicator" id="camera-indicator">❌</span></span>
             <span id="offline-status">Offline: <span class="status-indicator">✅</span></span>
             <span id="fps-status">FPS: <span id="fps-value">0</span></span>
-            <span id="recognition-status">Reconocimiento: <span class="status-indicator" id="recognition-indicator">⏳</span></span>
+            <span id="recognition-status" class="hidden">Reconocimiento: <span class="status-indicator" id="recognition-indicator">⏳</span></span>
         </div>
         <div class="status-right">
-            <span id="active-student-status">Cuenta: <span id="active-student-name">Ninguna</span></span>
             <button id="toggle-recognition-btn" class="secondary-btn">Apagar reconocimiento</button>
             <button id="admin-btn" class="secondary-btn">⚙️ Administración</button>
+            <button id="logout-btn" class="secondary-btn hidden">Cerrar sesión</button>
         </div>
     </div>
 
     <div id="main-container">
+        <div id="auth-warning" class="hidden">Inicia sesión para continuar</div>
         <!-- Zona 1: Video Feed -->
         <div id="video-zone">
             <h3>Cámara</h3>
