@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cantina Face - Acceso</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+<body class="login-view">
+    <div class="login-page">
+        <div class="login-panel">
+            <img src="/siloe-logo-blanco.png" alt="Cantina Face" class="login-logo" />
+            <h2>Acceso al sistema</h2>
+            <p class="subtitle">Ingresa con tu usuario autorizado</p>
+            <form id="login-form">
+                <label for="login-email">Correo electrónico</label>
+                <input type="email" id="login-email" name="username" required placeholder="admin@siloe.com.py" autocomplete="email" />
+                <label for="login-password">Contraseña</label>
+                <input type="password" id="login-password" name="password" required placeholder="********" autocomplete="current-password" />
+                <button type="submit" class="primary-btn login-btn">Iniciar sesión</button>
+                <p id="login-error" class="error-text" role="alert"></p>
+            </form>
+        </div>
+    </div>
+    <script src="/login.js"></script>
+</body>
+</html>

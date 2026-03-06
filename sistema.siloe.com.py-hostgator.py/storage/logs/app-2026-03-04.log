@@ -1,0 +1,4 @@
+[2026-03-04 10:17:01] litespeed.181.124.224.197 [ERROR] Uncaught exception {"type":"Error","message":"Call to undefined function db_fetch()","file":"/home1/siloecom/sistema.siloe.com.py/api/backend.php","line":152}
+[2026-03-04 10:17:01] litespeed.181.124.224.197 [ERROR] PHP error {"type":"Notice","message":"ob_clean(): Failed to delete buffer. No buffer to delete","file":"/home1/siloecom/sistema.siloe.com.py/app/bootstrap_core.php","line":39}
+[2026-03-04 10:18:06] litespeed.181.124.224.197 [ERROR] Uncaught exception {"type":"Error","message":"Call to undefined function db_fetch()","file":"/home1/siloecom/sistema.siloe.com.py/api/backend.php","line":152}
+[2026-03-04 10:18:06] litespeed.181.124.224.197 [ERROR] PHP error {"type":"Notice","message":"ob_clean(): Failed to delete buffer. No buffer to delete","file":"/home1/siloecom/sistema.siloe.com.py/app/bootstrap_core.php","line":39}

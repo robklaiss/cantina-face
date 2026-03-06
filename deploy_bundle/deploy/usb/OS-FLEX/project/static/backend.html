@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cantina Face - Backend</title>
+    <link rel="stylesheet" href="/backend.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+<body>
+    <div id="backend-root">
+        <div id="backend-login" class="panel">
+            <img src="/siloe-logo-blanco.png" alt="Cantina Face" class="brand-logo">
+            <h1>Backend General</h1>
+            <p class="subtitle">Acceso restringido – ingresa con tu usuario administrador</p>
+            <form id="login-form">
+                <label for="login-email">Correo</label>
+                <input type="email" id="login-email" name="username" required placeholder="admin@colegio.com">
+                <label for="login-password">Contraseña</label>
+                <input type="password" id="login-password" name="password" required placeholder="********">
+                <button type="submit" class="primary-btn">Ingresar</button>
+                <p id="login-error" class="error-text" role="alert"></p>
+            </form>
+        </div>
+
+        <div id="backend-app" class="hidden">
+            <header id="backend-header">
+                <div class="header-branding">
+                    <img src="/siloe-logo-blanco.png" alt="Cantina Face" class="brand-logo">
+                    <h1>Backend General</h1>
+                    <p class="subtitle">Gestión de usuarios, cajeras y alertas de stock</p>
+                </div>
+                <div class="header-actions">
+                    <span id="current-user-chip">--</span>
+                    <button id="refresh-data-btn" class="secondary-btn">↻ Actualizar</button>
+                    <button id="logout-btn" class="ghost-btn">Cerrar sesión</button>
+                    <a href="/admin.html" class="ghost-btn">↩ Ir al Admin clásico</a>
+                </div>
+            </header>
+
+            <main id="backend-content">
+                <section id="backend-dashboard" class="card-grid">
+                    <article class="stat-card">
+                        <p class="label">Usuarios totales</p>
+                        <h2 id="stat-total-users">--</h2>
+                        <small>Incluye todos los roles</small>
+                    </article>
+                    <article class="stat-card">
+                        <p class="label">Cajeras activas</p>
+                        <h2 id="stat-cashiers">--</h2>
+                        <small>Con acceso permitido</small>
+                    </article>
+                    <article class="stat-card warning">
+                        <p class="label">Alertas de stock</p>
+                        <h2 id="stat-stock-alerts">--</h2>
+                        <small>Productos en estado crítico/bajo</small>
+                    </article>
+                </section>
+
+                <section class="panel" id="stock-alerts-panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Alertas de stock</h2>
+                            <p class="subtitle">Configura umbrales y monitorea productos críticos</p>
+                        </div>
+                        <button id="reload-alerts-btn" class="secondary-btn">Actualizar alertas</button>
+                    </div>
+                    <div id="alerts-grid" class="alerts-grid"></div>
+                </section>
+
+                <section class="panel" id="users-panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Gestión de usuarios</h2>
+                            <p class="subtitle">Control de cajeras, stock y accesos especiales</p>
+                        </div>
+                        <button id="open-create-user" class="primary-btn">+ Nuevo usuario</button>
+                    </div>
+
+                    <div class="table-wrapper">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Nombre</th>
+                                    <th>Correo</th>
+                                    <th>Rol</th>
+                                    <th>POS</th>
+                                    <th>Estado</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody id="users-table-body">
+                                <tr>
+                                    <td colspan="6" class="muted">Cargando usuarios...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <section class="panel" id="link-requests-panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Solicitudes de vínculo padres</h2>
+                            <p class="subtitle">Aprueba o rechaza pedidos para asociar hijos a tutores</p>
+                        </div>
+                        <button id="reload-link-requests" class="secondary-btn">Actualizar</button>
+                    </div>
+                    <div id="link-requests-list" class="requests-list">
+                        <p class="muted">Cargando solicitudes...</p>
+                    </div>
+                </section>
+
+                <section class="panel" id="topups-panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Cargas de saldo pendientes</h2>
+                            <p class="subtitle">Revisa y procesa las solicitudes enviadas por los padres</p>
+                        </div>
+                        <button id="reload-topups" class="secondary-btn">Actualizar</button>
+                    </div>
+                    <div id="topups-list" class="requests-list">
+                        <p class="muted">Cargando solicitudes...</p>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div>
+
+    <div id="backend-modal" class="modal hidden">
+        <div class="modal-content" role="dialog" aria-modal="true">
+            <header class="modal-header">
+                <h3 id="modal-title">Modal</h3>
+                <button class="close-btn" id="close-modal">✕</button>
+            </header>
+            <div class="modal-body" id="modal-body"></div>
+        </div>
+    </div>
+
+    <div id="backend-notifications"></div>
+
+    <script src="/backend.js"></script>
+</body>
+</html>

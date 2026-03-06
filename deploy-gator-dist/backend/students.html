@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cantina Face - Alumnos registrados</title>
+    <link rel="stylesheet" href="backend.css?v=2.3">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+<body>
+    <div id="backend-root">
+        <div id="backend-app">
+            <header id="backend-header">
+                <div class="header-branding">
+                    <img src="siloe-logo-blanco.png" alt="Cantina Face" class="brand-logo">
+                    <div>
+                        <div class="page-breadcrumbs">
+                            <a href="index.html">Backend General</a>
+                            <span>/</span>
+                            <span>Alumnos registrados</span>
+                        </div>
+                        <h1>Alumnos registrados</h1>
+                        <p class="subtitle">Listado completo con filtros por nombre, ID y grado</p>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <span id="current-user-chip">--</span>
+                    <a href="index.html" class="secondary-btn button-link">Volver al inicio</a>
+                </div>
+            </header>
+
+            <main id="backend-content">
+                <section class="panel panel-page" id="students-directory-panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Todos los alumnos</h2>
+                            <p class="subtitle">Usa los filtros para encontrar alumnos y copiar su ID visible</p>
+                        </div>
+                        <div class="panel-actions">
+                            <button id="reload-students" class="secondary-btn">Actualizar</button>
+                        </div>
+                    </div>
+
+                    <div class="students-filters" aria-label="Filtros de alumnos registrados">
+                        <input
+                            type="search"
+                            id="students-search-input"
+                            placeholder="Buscar por nombre o ID"
+                            autocomplete="off"
+                        >
+                        <select id="students-grade-filter">
+                            <option value="">Todos los grados</option>
+                        </select>
+                    </div>
+
+                    <div class="table-wrapper students-directory-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Nombre</th>
+                                    <th>Grado</th>
+                                    <th>Vinculación</th>
+                                    <th>Saldo</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody id="students-table-body">
+                                <tr>
+                                    <td colspan="6" class="muted">Cargando alumnos...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div>
+
+    <div id="backend-modal" class="modal hidden">
+        <div class="modal-content" role="dialog" aria-modal="true">
+            <header class="modal-header">
+                <h3 id="modal-title">Modal</h3>
+                <button class="close-btn" id="close-modal">✕</button>
+            </header>
+            <div class="modal-body" id="modal-body"></div>
+        </div>
+    </div>
+
+    <div id="backend-notifications"></div>
+
+    <script src="config.js?v=2.2"></script>
+    <script src="students-directory.js?v=2.3"></script>
+    <script src="students-page.js?v=2.3"></script>
+</body>
+</html>

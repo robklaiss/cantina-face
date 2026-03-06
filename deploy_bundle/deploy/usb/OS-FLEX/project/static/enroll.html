@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cantina Face - Registro Ágil</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+<body>
+    <!-- Barra Superior de Estado -->
+    <div id="status-bar">
+        <span id="camera-status">Cámara: <span class="status-indicator" id="camera-indicator">❌</span></span>
+        <span id="offline-status">Offline: <span class="status-indicator">✅</span></span>
+        <span id="enrollment-status">Estado: <span id="enrollment-state">Listo</span></span>
+    </div>
+
+    <div id="enrollment-container">
+        <!-- Formulario de Datos -->
+        <div id="form-zone">
+            <div class="header-with-back">
+                <button id="back-to-main" class="back-btn" title="Volver al menú principal">
+                    ← Volver
+                </button>
+                <h2>Registro Ágil de Alumno</h2>
+            </div>
+            <form id="enroll-form">
+                <div class="form-group">
+                    <label for="student-name">Nombre:</label>
+                    <input type="text" id="student-name" required placeholder="Nombre del alumno" title="Ctrl+S para guardar">
+                </div>
+                <div class="form-group">
+                    <label for="student-grade">Grado:</label>
+                    <input type="text" id="student-grade" required placeholder="Ej: 3ro Básico" title="Ctrl+S para guardar">
+                </div>
+                <div class="form-group">
+                    <label for="student-balance">Saldo Inicial:</label>
+                    <input type="number" id="student-balance" value="0" min="0" step="100" title="Saldo en guaraníes">
+                    <span class="currency">Gs.</span>
+                </div>
+                <hr style="margin: 1rem 0; border-color: #334155;" />
+                <div class="form-group">
+                    <label for="enroll-existing-search">O asignar esta cara a un alumno existente:</label>
+                    <input type="text" id="enroll-existing-search" placeholder="Buscar alumno..." autocomplete="off">
+                    <div id="enroll-existing-results"></div>
+                    <small id="enroll-existing-selected" style="display:block;margin-top:4px;color:#9ca3af;"></small>
+                </div>
+            </form>
+        </div>
+
+        <!-- Zona de Cámara -->
+        <div id="camera-zone">
+            <h3>Captura de Foto</h3>
+            <video id="enroll-video" autoplay playsinline muted></video>
+            <div id="video-overlay">
+                <div id="face-bbox"></div>
+            </div>
+
+            <!-- Controles de Captura -->
+            <div id="capture-controls">
+                <button id="capture-one-shot" class="capture-btn" title="Space">
+                    📸 Captura Rápida<br><small>(1 foto)</small>
+                </button>
+                <button id="capture-burst" class="capture-btn" title="Shift+Space">
+                    🎥 Captura Ráfaga<br><small>(5 fotos / 2s)</small>
+                </button>
+            </div>
+        </div>
+
+        <!-- Zona de Preview -->
+        <div id="preview-zone">
+            <h3>Preview</h3>
+            <div id="photo-preview">
+                <div id="no-preview" class="center-text">
+                    Sin foto capturada
+                </div>
+                <img id="preview-image" class="hidden" alt="Foto del alumno">
+            </div>
+
+            <div id="embedding-status">
+                <p><strong>Estado del Embedding:</strong> <span id="embedding-state">No calculado</span></p>
+            </div>
+
+            <!-- Acciones -->
+            <div id="enrollment-actions">
+                <button id="enroll-submit" disabled title="Ctrl+S">
+                    💾 Registrar Alumno
+                </button>
+                <button id="enroll-cancel" title="Ctrl+←">
+                    ← Volver a Caja
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notificaciones -->
+    <div id="notifications"></div>
+
+    <script src="enroll.js"></script>
+</body>
+</html>

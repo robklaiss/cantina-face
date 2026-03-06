@@ -1,0 +1,50 @@
+# Cantina Face — HostGator Security Rules
+# Block access to sensitive files and directories
+
+# Deny access to SQLite databases
+<FilesMatch "\.(sqlite|sqlite3|db)$">
+    Require all denied
+</FilesMatch>
+
+# Deny access to hidden files (dotfiles)
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+# Deny access to Python files
+<FilesMatch "\.(py|pyc)$">
+    Require all denied
+</FilesMatch>
+
+# Deny access to environment and config files that shouldn't be public
+<FilesMatch "\.(env|ini|cfg|conf|log)$">
+    Require all denied
+</FilesMatch>
+
+# Block known sensitive directories (if they somehow end up here)
+RedirectMatch 403 ^/app(/.*)?$
+RedirectMatch 403 ^/database(/.*)?$
+RedirectMatch 403 ^/data(/.*)?$
+
+# Enable directory indexes only where needed
+Options -Indexes
+
+# UTF-8 encoding
+AddDefaultCharset UTF-8
+
+# Cache static assets (1 week)
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css "access plus 1 week"
+    ExpiresByType application/javascript "access plus 1 week"
+    ExpiresByType image/png "access plus 1 week"
+    ExpiresByType image/jpeg "access plus 1 week"
+    ExpiresByType image/svg+xml "access plus 1 week"
+</IfModule>
+
+# CORS headers for API calls from frontend
+<IfModule mod_headers.c>
+    <FilesMatch "\.(html|js|css)$">
+        Header set Access-Control-Allow-Origin "*"
+    </FilesMatch>
+</IfModule>

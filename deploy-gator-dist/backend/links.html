@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cantina Face - Vínculos</title>
+    <link rel="stylesheet" href="backend.css?v=2.3">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+<body>
+    <div id="backend-root">
+        <div id="backend-app">
+            <header id="backend-header">
+                <div class="header-branding">
+                    <img src="siloe-logo-blanco.png" alt="Cantina Face" class="brand-logo">
+                    <div>
+                        <div class="page-breadcrumbs">
+                            <a href="index.html">Backend General</a>
+                            <span>/</span>
+                            <span>Vínculos</span>
+                        </div>
+                        <h1>Vínculos y solicitudes</h1>
+                        <p class="subtitle">Listado completo de solicitudes y vínculos procesados para seguimiento</p>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <span id="current-user-chip">--</span>
+                    <a href="index.html" class="secondary-btn button-link">Volver al inicio</a>
+                </div>
+            </header>
+
+            <main id="backend-content">
+                <section class="panel panel-page" id="links-directory-panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Todos los vínculos</h2>
+                            <p class="subtitle">Busca por alumno, parent ID, identificador o estado</p>
+                        </div>
+                        <div class="panel-actions">
+                            <button id="reload-links" class="secondary-btn">Actualizar</button>
+                        </div>
+                    </div>
+
+                    <div class="students-filters" aria-label="Filtros de vínculos">
+                        <input
+                            type="search"
+                            id="links-search-input"
+                            placeholder="Buscar por alumno, parent ID o identificador"
+                            autocomplete="off"
+                        >
+                        <select id="links-status-filter">
+                            <option value="">Todos los estados</option>
+                            <option value="pending">Pendiente</option>
+                            <option value="approved">Aprobado</option>
+                            <option value="rejected">Rechazado</option>
+                        </select>
+                    </div>
+
+                    <div class="table-wrapper students-directory-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Estado</th>
+                                    <th>Parent ID</th>
+                                    <th>Responsable</th>
+                                    <th>Alumno</th>
+                                    <th>Grado</th>
+                                    <th>Identificador</th>
+                                    <th>ID interno</th>
+                                    <th>ID externo / código</th>
+                                    <th>Creado</th>
+                                    <th>Procesado</th>
+                                </tr>
+                            </thead>
+                            <tbody id="links-table-body">
+                                <tr>
+                                    <td colspan="10" class="muted">Cargando vínculos...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div>
+
+    <div id="backend-notifications"></div>
+
+    <script src="config.js?v=2.2"></script>
+    <script src="links-page.js?v=2.3"></script>
+</body>
+</html>

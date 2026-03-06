@@ -1,0 +1,4 @@
+[2026-02-13 15:06:27] litespeed.181.124.224.197 [ERROR] Uncaught exception {"type":"PDOException","message":"SQLSTATE[HY000]: General error: 1 no such table: parent_student","file":"/home1/siloecom/sistema.siloe.com.py/app/domain.php","line":69}
+[2026-02-13 15:06:27] litespeed.181.124.224.197 [ERROR] PHP error {"type":"Notice","message":"ob_clean(): Failed to delete buffer. No buffer to delete","file":"/home1/siloecom/sistema.siloe.com.py/app/bootstrap_core.php","line":40}
+[2026-02-13 15:08:48] litespeed.181.124.224.197 [ERROR] Uncaught exception {"type":"PDOException","message":"SQLSTATE[HY000]: General error: 1 no such table: parent_student","file":"/home1/siloecom/sistema.siloe.com.py/app/domain.php","line":69}
+[2026-02-13 15:08:48] litespeed.181.124.224.197 [ERROR] PHP error {"type":"Notice","message":"ob_clean(): Failed to delete buffer. No buffer to delete","file":"/home1/siloecom/sistema.siloe.com.py/app/bootstrap_core.php","line":40}

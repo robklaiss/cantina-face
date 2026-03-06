@@ -1,0 +1,1332 @@
+// Global constants/state
+const FRAME_INTERVAL_MS = 500; // Keep in sync with backend config
+const MAX_FRAME_INTERVAL_MS = 2000;
+
+let videoStream = null;
+let recognitionEnabled = true;
+let currentStudent = null;
+let selectedProduct = null;
+let products = [];
+let searchTimeout = null;
+let manualStudentSelection = false; // Track if user manually selected student
+let fpsCounter = 0;
+let lastFpsUpdate = Date.now();
+let frameCount = 0;
+let lastFrameTimestamp = null;
+let smoothedFps = 0;
+const FPS_SMOOTHING = 0.2;
+let recognitionTimer = null;
+let recognitionInFlight = false;
+let dynamicFrameInterval = FRAME_INTERVAL_MS;
+let saleMode = false;
+let cart = [];
+let recognitionPausedByMode = false;
+const AUTH_TOKEN_KEY = 'cantina_face_token';
+const AUTH_USER_KEY = 'cantina_face_user';
+const AUTH_PROFILE_KEY = 'cantina_face_user_profile';
+const DEFAULT_POINT_OF_SALE_ID = 1;
+let authToken = localStorage.getItem(AUTH_TOKEN_KEY) || null;
+let authUserEmail = localStorage.getItem(AUTH_USER_KEY) || null;
+let authUserProfile = loadProfileFromStorage();
+let appInitialized = false;
+const nativeFetch = window.fetch.bind(window);
+
+function currentPathWithFallback() {
+    const path = `${window.location.pathname}${window.location.search}`;
+    if (!path || path === '/' || path.startsWith('/login')) {
+        return '/index.html';
+    }
+    return path;
+}
+
+function redirectToLogin() {
+    const next = encodeURIComponent(currentPathWithFallback());
+    window.location.href = `/login.html?next=${next}`;
+}
+
+// Helpers
+function formatGs(amount) {
+    const n = Number(amount) || 0;
+    try {
+        return n.toLocaleString('es-PY', { maximumFractionDigits: 0 });
+    } catch (_) {
+        return n.toString();
+    }
+}
+
+function navigateToSalesView(studentId) {
+    if (!studentId) return;
+    pauseRecognitionForMode(false);
+    window.location.href = `/sales?student_id=${encodeURIComponent(studentId)}`;
+}
+
+function loadProfileFromStorage() {
+    try {
+        const raw = localStorage.getItem(AUTH_PROFILE_KEY);
+        return raw ? JSON.parse(raw) : null;
+    } catch (error) {
+        console.warn('Failed to parse stored profile', error);
+        return null;
+    }
+}
+
+function setAuthUserProfile(profile) {
+    authUserProfile = profile || null;
+    if (profile) {
+        localStorage.setItem(AUTH_PROFILE_KEY, JSON.stringify(profile));
+    } else {
+        localStorage.removeItem(AUTH_PROFILE_KEY);
+    }
+}
+
+function setAuthSession(token, email) {
+    authToken = token || null;
+    authUserEmail = email || null;
+    if (authToken) {
+        localStorage.setItem(AUTH_TOKEN_KEY, authToken);
+        if (authUserEmail) localStorage.setItem(AUTH_USER_KEY, authUserEmail);
+    } else {
+        localStorage.removeItem(AUTH_TOKEN_KEY);
+        localStorage.removeItem(AUTH_USER_KEY);
+        setAuthUserProfile(null);
+    }
+    updateLogoutButton();
+    hideAuthWarning();
+}
+
+function updateLogoutButton() {
+    if (!logoutBtn) return;
+    if (authToken) {
+        logoutBtn.classList.remove('hidden');
+    } else {
+        logoutBtn.classList.add('hidden');
+    }
+}
+
+function handleUnauthorized() {
+    if (!authToken) return;
+    showNotification('Sesión expirada, vuelve a ingresar', 'error');
+    logout(true);
+}
+
+async function fetchWithAuth(url, options = {}) {
+    const headers = options.headers ? { ...options.headers } : {};
+    if (authToken && !headers['Authorization']) {
+        headers['Authorization'] = `Bearer ${authToken}`;
+    }
+    const response = await nativeFetch(url, { ...options, headers });
+    if (response.status === 401 && authToken) {
+        handleUnauthorized();
+    }
+    return response;
+}
+
+window.fetch = fetchWithAuth;
+
+async function ensureUserProfile() {
+    if (!authToken || authUserProfile) return;
+    try {
+        const response = await fetchWithAuth('/auth/me');
+        if (response.ok) {
+            const profile = await response.json();
+            setAuthUserProfile(profile);
+        }
+    } catch (error) {
+        console.error('Failed to load user profile:', error);
+    }
+}
+
+function getActivePointOfSaleId() {
+    return authUserProfile?.point_of_sale_id ?? DEFAULT_POINT_OF_SALE_ID;
+}
+
+function pauseRecognitionForMode(allowResume = true) {
+    if (!recognitionEnabled) {
+        recognitionPausedByMode = false;
+        return;
+    }
+    recognitionPausedByMode = allowResume;
+    recognitionEnabled = false;
+    stopRecognition();
+    stopCamera();
+    recognitionIndicator.textContent = '⛔';
+    recognitionIndicator.className = 'status-indicator warning';
+    cameraIndicator.textContent = '❌';
+    cameraIndicator.className = 'status-indicator error';
+    if (fpsValue) {
+        fpsValue.textContent = '0';
+    }
+    if (fpsStatus) {
+        fpsStatus.title = 'Cámara detenida';
+    }
+    if (toggleRecognitionBtn) {
+        toggleRecognitionBtn.textContent = 'Encender reconocimiento';
+    }
+}
+
+async function resumeRecognitionAfterMode() {
+    if (!recognitionPausedByMode) {
+        return;
+    }
+    recognitionPausedByMode = false;
+    recognitionEnabled = true;
+    if (toggleRecognitionBtn) {
+        toggleRecognitionBtn.textContent = 'Apagar reconocimiento';
+    }
+    try {
+        await startCamera();
+        startRecognition();
+        recognitionIndicator.textContent = '⏳';
+        recognitionIndicator.className = 'status-indicator info';
+    } catch (error) {
+        console.error('Error resuming recognition:', error);
+        showNotification('No se pudo reactivar la cámara automáticamente', 'error');
+    }
+}
+
+// Search products (manual search in sale mode)
+function searchProducts(query) {
+    const trimmed = (query || '').trim().toLowerCase();
+    if (!searchResults) return;
+    searchResults.innerHTML = '';
+    searchResults.classList.remove('visible');
+
+    if (!trimmed) {
+        return;
+    }
+
+    if (!products || products.length === 0) {
+        searchResults.innerHTML = '<p class="no-data">Sin productos cargados</p>';
+        searchResults.classList.add('visible');
+        return;
+    }
+
+    const matches = products.filter((product) => {
+        const name = (product.name || '').toLowerCase();
+        const priceStr = String(product.price || '');
+        return name.includes(trimmed) || priceStr.includes(trimmed);
+    });
+
+    if (matches.length === 0) {
+        searchResults.innerHTML = '<p class="no-data">Sin productos coincidentes</p>';
+        searchResults.classList.add('visible');
+        return;
+    }
+
+    displayProductSearchResults(matches);
+}
+
+function displayProductSearchResults(productList) {
+    if (!searchResults) return;
+    searchResults.innerHTML = '';
+
+    productList.forEach((product) => {
+        const stockAmount = typeof product.stock === 'number' ? product.stock : 0;
+        const inStock = stockAmount > 0;
+        const div = document.createElement('div');
+        div.className = 'search-result' + (inStock ? '' : ' out-of-stock');
+        div.innerHTML = `
+            <div class="search-info">
+                <div class="search-name">${product.name}</div>
+                <div class="search-grade">${formatGs(product.price)} Gs.</div>
+                <div class="search-balance">
+                    ${inStock ? `Stock: ${stockAmount}` : '<span class="status-out-of-stock">Fuera de stock</span>'}
+                </div>
+            </div>
+        `;
+
+        if (inStock) {
+            div.addEventListener('click', () => {
+                if (!currentStudent) {
+                    showNotification('No hay alumno seleccionado', 'error');
+                    return;
+                }
+                addToCart(product.id);
+                searchInput.value = '';
+                searchResults.innerHTML = '';
+                searchResults.classList.remove('visible');
+            });
+        } else {
+            div.title = 'Fuera de stock';
+        }
+
+        searchResults.appendChild(div);
+    });
+
+    if (productList.length > 0) {
+        searchResults.classList.add('visible');
+    } else {
+        searchResults.classList.remove('visible');
+    }
+}
+
+// DOM elements
+const video = document.getElementById('video');
+const studentCard = document.getElementById('student-card');
+const noStudent = document.getElementById('no-student');
+const studentZone = document.getElementById('student-zone');
+const studentPhoto = document.getElementById('student-photo');
+const studentName = document.getElementById('student-name');
+const studentGrade = document.getElementById('student-grade');
+const studentBalance = document.getElementById('student-balance');
+const attachFaceBtn = document.getElementById('attach-face-btn');
+const cameraIndicator = document.getElementById('camera-indicator');
+const recognitionIndicator = document.getElementById('recognition-indicator');
+const fpsValue = document.getElementById('fps-value');
+const fpsStatus = document.getElementById('fps-status');
+const videoZone = document.getElementById('video-zone');
+const productButtons = document.querySelectorAll('.product-btn');
+const selectedProductSpan = document.getElementById('selected-product');
+const selectedPriceSpan = document.getElementById('selected-price');
+const searchInput = document.getElementById('search-input');
+const searchResults = document.getElementById('search-results');
+const cartItems = document.getElementById('cart-items');
+const cartTotal = document.getElementById('cart-total');
+const productInfoPanel = document.getElementById('product-info');
+const quickSearchInput = document.getElementById('quick-search-input');
+const quickSearchResults = document.getElementById('quick-search-results');
+const studentQuickSearch = document.getElementById('student-quick-search');
+const enrollBtn = document.getElementById('enroll-btn');
+const clearBtn = document.getElementById('clear-btn');
+const chargeBtn = document.getElementById('charge-btn');
+const manualCharge = document.getElementById('manual-charge');
+const productsZone = document.getElementById('products-zone');
+const searchZone = document.getElementById('search-zone');
+const activeStudentName = document.getElementById('active-student-name');
+const exitSaleBtn = document.getElementById('exit-sale-btn');
+const toggleRecognitionBtn = document.getElementById('toggle-recognition-btn');
+const adminBtn = document.getElementById('admin-btn');
+const statusRight = document.querySelector('#status-bar .status-right');
+let saleCloseBtn = null;
+const logoutBtn = document.getElementById('logout-btn');
+const authWarning = document.getElementById('auth-warning');
+
+function showAuthWarning(message = 'Inicia sesión para continuar') {
+    if (!authWarning) return;
+    authWarning.textContent = message;
+    authWarning.classList.remove('hidden');
+}
+
+function hideAuthWarning() {
+    authWarning?.classList.add('hidden');
+}
+
+function ensureSaleCloseButton() {
+    if (saleCloseBtn || !statusRight) return saleCloseBtn;
+    saleCloseBtn = document.createElement('button');
+    saleCloseBtn.id = 'sale-close-btn';
+    saleCloseBtn.className = 'secondary-btn';
+    saleCloseBtn.textContent = '✖️ Cerrar';
+    saleCloseBtn.style.display = 'none';
+    saleCloseBtn.addEventListener('click', () => clearBtn.click());
+    statusRight.insertBefore(saleCloseBtn, toggleRecognitionBtn || null);
+    return saleCloseBtn;
+}
+
+// Initialize application
+async function init() {
+    // Bind UI events early so navigation works even if initialization fails (e.g., camera denied)
+    setupEventListeners();
+
+    if (!authToken) {
+        showAuthWarning('Redirigiendo al inicio de sesión...');
+        redirectToLogin();
+        return;
+    }
+
+    await ensureUserProfile();
+
+    updateLogoutButton();
+    logoutBtn?.addEventListener('click', () => logout());
+
+    try {
+        await loadProducts();
+        await startCamera();
+        startRecognition();
+        showNotification('System initialized', 'success');
+        appInitialized = true;
+    } catch (error) {
+        showNotification('Failed to initialize: ' + error.message, 'error');
+    }
+
+    if (attachFaceBtn) {
+        attachFaceBtn.addEventListener('click', attachCurrentFaceToStudent);
+    }
+}
+
+function logout(silent = false) {
+    stopRecognition();
+    stopCamera();
+    setAuthSession(null, null);
+    appInitialized = false;
+    if (!silent) {
+        showNotification('Sesión cerrada', 'info');
+    }
+    redirectToLogin();
+}
+
+// ...
+
+// Load products from API
+async function loadProducts() {
+    try {
+        const response = await fetchWithAuth('/api/products');
+        products = await response.json();
+
+        const availableProducts = products.filter(product => (product?.stock ?? 0) > 0);
+
+        // Update product buttons with names and prices and real IDs (only for in-stock products)
+        productButtons.forEach((btn, index) => {
+            const product = availableProducts[index];
+            if (product) {
+                btn.dataset.productId = String(product.id);
+                btn.title = `${product.name} — ${formatGs(product.price)} Gs.`;
+                btn.innerHTML = `
+                    <span class="kbd-index">${index + 1}</span>
+                    <span class="label">${product.name}</span>
+                    <span class="price">${formatGs(product.price)} Gs.</span>
+                `;
+                btn.disabled = false;
+                btn.classList.remove('disabled');
+            } else {
+                // No product for this slot
+                btn.removeAttribute('data-product-id');
+                btn.innerHTML = `<span class="label">—</span>`;
+                btn.title = 'Fuera de stock';
+                btn.disabled = true;
+                btn.classList.add('disabled');
+            }
+        });
+    } catch (error) {
+        showNotification('Failed to load products', 'error');
+    }
+}
+
+// Start camera feed
+async function startCamera() {
+    console.log('📷 startCamera() called - requesting camera permission...');
+    try {
+        if (videoStream) {
+            return;
+        }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            console.error('Camera API not supported in this browser context.');
+            throw new Error('Camera API not supported');
+        }
+
+        console.log('📹 Requesting camera stream...');
+        videoStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+                facingMode: 'user'
+            }
+        });
+
+        console.log('✅ Camera stream obtained');
+        video.srcObject = videoStream;
+        if (video.play) {
+            await video.play().catch(() => {});
+        }
+        cameraIndicator.textContent = '✅';
+        cameraIndicator.className = 'status-indicator success';
+        resetFpsDisplay('--', 'Cámara preparada, esperando frames');
+        console.log('📷 Camera initialized successfully');
+    } catch (error) {
+        console.error('❌ Camera error:', error);
+        cameraIndicator.textContent = '❌';
+        cameraIndicator.className = 'status-indicator error';
+        if (fpsValue) {
+            fpsValue.textContent = '0';
+        }
+        if (fpsStatus) {
+            fpsStatus.title = 'Cámara no disponible';
+        }
+        throw new Error('Camera access denied: ' + (error && error.message ? error.message : String(error)));
+    }
+}
+
+function stopCamera() {
+    console.log('📷 stopCamera()');
+    if (videoStream) {
+        videoStream.getTracks().forEach(track => track.stop());
+        videoStream = null;
+    }
+    if (video) {
+        if (video.pause) {
+            video.pause();
+        }
+        video.srcObject = null;
+    }
+    cameraIndicator.textContent = '❌';
+    cameraIndicator.className = 'status-indicator error';
+    console.log('📷 Camera stopped');
+}
+
+function scheduleNextRecognition(delayMs = FRAME_INTERVAL_MS) {
+    if (!recognitionEnabled) {
+        return;
+    }
+    const clamped = Math.min(MAX_FRAME_INTERVAL_MS, Math.max(FRAME_INTERVAL_MS, delayMs));
+    dynamicFrameInterval = clamped;
+    if (recognitionTimer) {
+        clearTimeout(recognitionTimer);
+    }
+    recognitionTimer = setTimeout(runRecognitionLoop, dynamicFrameInterval);
+}
+
+async function runRecognitionLoop() {
+    if (!recognitionEnabled || !videoStream) {
+        stopRecognition();
+        return;
+    }
+    if (recognitionInFlight) {
+        scheduleNextRecognition(dynamicFrameInterval);
+        return;
+    }
+
+    recognitionInFlight = true;
+    const loopStart = performance.now();
+
+    try {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0);
+
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+        if (!blob) {
+            scheduleNextRecognition(dynamicFrameInterval * 1.2);
+            return;
+        }
+        const formData = new FormData();
+        formData.append('file', blob, 'frame.jpg');
+
+        const response = await fetch('/api/recognize', {
+            method: 'POST',
+            body: formData
+        });
+
+        const result = await response.json();
+        updateRecognitionResult(result);
+
+        const now = Date.now();
+        frameCount += 1;
+        if (now - lastFpsUpdate >= 1000) {
+            const instantaneousFps = frameCount * (1000 / (now - lastFpsUpdate));
+            smoothedFps = smoothedFps === 0
+                ? instantaneousFps
+                : (smoothedFps * (1 - FPS_SMOOTHING)) + (instantaneousFps * FPS_SMOOTHING);
+            if (fpsValue) {
+                fpsValue.textContent = smoothedFps.toFixed(1);
+            }
+            if (fpsStatus) {
+                fpsStatus.title = `Último cálculo: ${smoothedFps.toFixed(2)} FPS`;
+            }
+            frameCount = 0;
+            lastFpsUpdate = now;
+        }
+        lastFrameTimestamp = now;
+
+        const throttleDelay = result?.throttle?.retry_after_ms;
+        if (typeof throttleDelay === 'number') {
+            scheduleNextRecognition(throttleDelay);
+        } else if (!result?.match) {
+            scheduleNextRecognition(dynamicFrameInterval * 1.2);
+        } else {
+            scheduleNextRecognition(FRAME_INTERVAL_MS);
+        }
+    } catch (error) {
+        console.error('Recognition error:', error);
+        recognitionIndicator.textContent = '❌';
+        recognitionIndicator.className = 'status-indicator error';
+        resetFpsDisplay('0', 'Error de reconocimiento');
+        scheduleNextRecognition(dynamicFrameInterval * 1.5);
+    } finally {
+        recognitionInFlight = false;
+    }
+
+    const loopElapsed = performance.now() - loopStart;
+    const utilizationHint = loopElapsed / (dynamicFrameInterval + loopElapsed);
+    if (utilizationHint > 0.7) {
+        dynamicFrameInterval = Math.min(MAX_FRAME_INTERVAL_MS, dynamicFrameInterval * 1.25);
+    }
+}
+
+// Start face recognition loop
+function startRecognition() {
+    if (!recognitionEnabled) {
+        return;
+    }
+
+    if (recognitionTimer) {
+        clearTimeout(recognitionTimer);
+        recognitionTimer = null;
+    }
+
+    lastFpsUpdate = Date.now();
+    frameCount = 0;
+    lastFrameTimestamp = null;
+    smoothedFps = 0;
+    dynamicFrameInterval = FRAME_INTERVAL_MS;
+    resetFpsDisplay('--', 'Inicializando reconocimiento');
+    recognitionIndicator.textContent = '⏳';
+    recognitionIndicator.className = 'status-indicator info';
+    scheduleNextRecognition();
+}
+
+function stopRecognition() {
+    if (recognitionTimer) {
+        clearTimeout(recognitionTimer);
+        recognitionTimer = null;
+    }
+    recognitionInFlight = false;
+
+    frameCount = 0;
+    recognitionIndicator.textContent = '⏹';
+    recognitionIndicator.className = 'status-indicator';
+    resetFpsDisplay('0', 'Reconocimiento detenido');
+
+    const faceBbox = document.getElementById('face-bbox');
+    if (faceBbox) {
+        faceBbox.style.display = 'none';
+    }
+}
+
+// Update recognition result
+function updateRecognitionResult(result) {
+    // Update face detection visualization
+    updateFaceDetectionOverlay(result.detection);
+
+    // In sale mode with a manually selected student, keep current student fixed
+    if (saleMode && manualStudentSelection) {
+        return;
+    }
+
+    if (result.match) {
+        showStudentCard(result.student, result.score);
+        recognitionIndicator.textContent = '✅';
+        recognitionIndicator.className = 'status-indicator success';
+        recognitionIndicator.title = result.student?.name ? `Reconocido: ${result.student.name}` : 'Reconocimiento exitoso';
+    } else {
+        // Only clear if user hasn't manually selected a student
+        if (!manualStudentSelection) {
+            currentStudent = null;
+            hideStudentCard();
+        }
+        recognitionIndicator.textContent = '⏳';
+        recognitionIndicator.className = 'status-indicator info';
+        recognitionIndicator.title = 'Sin coincidencias en el último frame';
+    }
+}
+
+function resetFpsDisplay(value = '0', tooltip = '') {
+    if (fpsValue) {
+        fpsValue.textContent = value;
+    }
+    if (fpsStatus) {
+        fpsStatus.title = tooltip || '';
+    }
+}
+
+// Update face detection overlay
+function updateFaceDetectionOverlay(detection) {
+    const faceBbox = document.getElementById('face-bbox');
+    const overlay = document.getElementById('video-overlay');
+
+    if (!detection || !detection.face_detected || !detection.bbox) {
+        faceBbox.style.display = 'none';
+        return;
+    }
+    
+    // Get overlay dimensions (coinciden visualmente con el video)
+    const overlayRect = overlay.getBoundingClientRect();
+    
+    // Calculate bbox position relative to overlay
+    const bbox = detection.bbox;
+    const x1 = bbox.x1 * overlayRect.width;
+    const y1 = bbox.y1 * overlayRect.height;
+    const x2 = bbox.x2 * overlayRect.width;
+    const y2 = bbox.y2 * overlayRect.height;
+    
+    const width = x2 - x1;
+    const height = y2 - y1;
+
+    // Expand vertically to capture full face (forehead to chin)
+    const expandedHeight = height * 1.4;
+    const deltaHeight = (expandedHeight - height) / 2;
+    const adjustedY = Math.max(0, y1 - deltaHeight);
+    const clampedHeight = Math.min(expandedHeight, overlayRect.height - adjustedY);
+    
+    // Update bbox element
+    faceBbox.style.display = 'block';
+    faceBbox.style.left = `${x1}px`;
+    faceBbox.style.top = `${adjustedY}px`;
+    faceBbox.style.width = `${width}px`;
+    faceBbox.style.height = `${clampedHeight}px`;
+    
+    // Add confidence indicator
+    const confidence = Math.round(detection.confidence * 100);
+    faceBbox.innerHTML = `
+        <div class="detection-info">
+            <span class="confidence">Face: ${confidence}%</span>
+        </div>
+    `;
+    
+    // Color code based on confidence
+    if (confidence > 80) {
+        faceBbox.className = 'face-bbox high-confidence';
+    } else if (confidence > 60) {
+        faceBbox.className = 'face-bbox medium-confidence';
+    } else {
+        faceBbox.className = 'face-bbox low-confidence';
+    }
+}
+
+// Show student card
+function showStudentCard(student, score = null) {
+    studentPhoto.src = student.photo_url || '/default-avatar.png';
+    studentName.textContent = student.name;
+    studentGrade.textContent = student.grade;
+    studentBalance.textContent = formatGs(student.balance);
+
+    currentStudent = student;
+
+    if (activeStudentName) {
+        activeStudentName.textContent = student.name;
+    }
+
+    studentCard.classList.remove('hidden');
+    noStudent.classList.add('hidden');
+    manualCharge.classList.remove('hidden');
+}
+
+// Hide student card
+function hideStudentCard() {
+    studentCard.classList.add('hidden');
+    noStudent.classList.remove('hidden');
+    manualCharge.classList.add('hidden');
+    currentStudent = null;
+    manualStudentSelection = false; // Reset manual selection flag
+
+    if (activeStudentName && !saleMode) {
+        activeStudentName.textContent = 'Ninguna';
+    }
+}
+
+// Enter sale mode (show products and search)
+function enterSaleMode() {
+    if (!productsZone || !searchZone) {
+        return;
+    }
+
+    saleMode = true;
+
+    pauseRecognitionForMode();
+
+    if (productsZone) {
+        productsZone.classList.remove('hidden');
+    }
+
+    if (searchZone) {
+        searchZone.classList.remove('hidden');
+    }
+
+    if (videoZone) {
+        videoZone.classList.add('hidden');
+    }
+
+    if (studentQuickSearch) {
+        studentQuickSearch.classList.add('hidden');
+    }
+
+    if (productInfoPanel) {
+        productInfoPanel.classList.remove('hidden');
+    }
+
+    if (toggleRecognitionBtn) {
+        toggleRecognitionBtn.style.display = 'none';
+    }
+
+    if (adminBtn) {
+        adminBtn.style.display = 'none';
+    }
+
+    const closeBtn = ensureSaleCloseButton();
+    if (closeBtn) {
+        closeBtn.style.display = 'inline-flex';
+    }
+
+    if (searchInput) {
+        setTimeout(() => searchInput.focus(), 100);
+    }
+
+    if (currentStudent && activeStudentName) {
+        activeStudentName.textContent = currentStudent.name;
+    }
+}
+
+// Cart helpers
+function renderCart() {
+    if (!cartItems || !cartTotal) return;
+
+    cartItems.innerHTML = '';
+
+    if (!cart || cart.length === 0) {
+        cartItems.innerHTML = '<p class="no-data">Sin productos seleccionados</p>';
+        cartTotal.textContent = '0';
+        return;
+    }
+
+    let total = 0;
+
+    cart.forEach(item => {
+        const product = products.find(p => p.id === item.productId);
+        if (!product) return;
+
+        const subtotal = product.price * item.quantity;
+        total += subtotal;
+
+        const row = document.createElement('div');
+        row.className = 'cart-item';
+        const minusLabel = item.quantity > 1 ? '-' : '🗑️';
+        const minusTitle = item.quantity > 1 ? 'Restar uno' : 'Eliminar producto';
+        row.innerHTML = `
+            <span class="cart-name">${product.name}</span>
+            <div class="cart-qty">
+                <span class="cart-subtotal">${formatGs(subtotal)} Gs.</span>
+                <button class="qty-btn minus" title="${minusTitle}">${minusLabel}</button>
+                <span class="qty">${item.quantity}</span>
+                <button class="qty-btn plus" title="Sumar uno">+</button>
+            </div>
+        `;
+
+        const minusBtn = row.querySelector('.qty-btn.minus');
+        const plusBtn = row.querySelector('.qty-btn.plus');
+
+        if (minusBtn) {
+            minusBtn.addEventListener('click', () => updateCartQuantity(item.productId, -1));
+        }
+        if (plusBtn) {
+            plusBtn.addEventListener('click', () => updateCartQuantity(item.productId, 1));
+        }
+
+        cartItems.appendChild(row);
+    });
+
+    cartTotal.textContent = formatGs(total);
+}
+
+function addToCart(productId) {
+    const product = products.find(p => p.id === productId);
+    if (!product) {
+        showNotification('Producto no disponible', 'error');
+        return;
+    }
+    if ((product.stock ?? 0) <= 0) {
+        showNotification('Producto fuera de stock', 'warning');
+        return;
+    }
+    const existing = cart.find(item => item.productId === productId);
+    if (existing) {
+        existing.quantity += 1;
+    } else {
+        cart.push({ productId, quantity: 1 });
+    }
+    renderCart();
+}
+
+// Attach current camera face to existing student
+async function attachCurrentFaceToStudent() {
+    if (!currentStudent) {
+        showNotification('No hay alumno seleccionado', 'error');
+        return;
+    }
+    if (!video || !video.videoWidth || !video.videoHeight) {
+        showNotification('Cámara no disponible para capturar la cara', 'error');
+        return;
+    }
+
+    try {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0);
+
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+        if (!blob) {
+            showNotification('No se pudo capturar la imagen de la cámara', 'error');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('frame', blob, 'frame.jpg');
+
+        const response = await fetch(`/api/students/${currentStudent.id}/attach-face`, {
+            method: 'POST',
+            body: formData,
+        });
+
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+            showNotification(result.detail || 'Error asociando la cara al alumno', 'error');
+            return;
+        }
+
+        if (result.photo_url) {
+            studentPhoto.src = result.photo_url;
+        }
+
+        showNotification('Cara actual asociada al alumno', 'success');
+    } catch (error) {
+        showNotification('Error asociando la cara: ' + error.message, 'error');
+    }
+}
+
+function updateCartQuantity(productId, delta) {
+    const item = cart.find(i => i.productId === productId);
+    if (!item) return;
+
+    item.quantity += delta;
+    if (item.quantity <= 0) {
+        cart = cart.filter(i => i.productId !== productId);
+    }
+    renderCart();
+}
+
+// Select product
+function selectProduct(productId) {
+    const product = products.find(p => p.id === productId);
+    if (product) {
+        selectedProduct = product;
+        selectedProductSpan.textContent = product.name;
+        selectedPriceSpan.textContent = product.price;
+
+        // Update button appearance
+        productButtons.forEach(btn => btn.classList.remove('selected'));
+        const selectedBtn = document.querySelector(`[data-product-id="${productId}"]`);
+        if (selectedBtn) {
+            selectedBtn.classList.add('selected');
+        }
+    }
+}
+
+// Charge entire cart
+async function chargeCart() {
+    if (!currentStudent) {
+        showNotification('No se seleccionó alumno', 'error');
+        return;
+    }
+
+    if (!cart || cart.length === 0) {
+        showNotification('No hay productos en el carrito', 'error');
+        return;
+    }
+
+    // Pre-calcular total y validar saldo y stock usando datos locales
+    let total = 0;
+    for (const item of cart) {
+        const product = products.find(p => p.id === item.productId);
+        if (!product) continue;
+        total += product.price * item.quantity;
+
+        if (typeof product.stock === 'number' && product.stock < item.quantity) {
+            showNotification(`Stock insuficiente para ${product.name}`, 'error');
+            return;
+        }
+    }
+
+    if (currentStudent.balance < total) {
+        showNotification('Saldo insuficiente para todos los productos', 'error');
+        return;
+    }
+
+    const pointOfSaleId = getActivePointOfSaleId();
+
+    try {
+        for (const item of cart) {
+            const product = products.find(p => p.id === item.productId);
+            if (!product) continue;
+
+            for (let i = 0; i < item.quantity; i++) {
+                const response = await fetchWithAuth('/api/charge', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        student_id: currentStudent.id,
+                        product_id: product.id,
+                        point_of_sale_id: pointOfSaleId,
+                    })
+                });
+
+                const result = await response.json();
+
+                if (!response.ok) {
+                    showNotification(result.detail || 'Error en el cobro', 'error');
+                    return;
+                }
+
+                if (typeof result.new_balance === 'number') {
+                    currentStudent.balance = result.new_balance;
+                    studentBalance.textContent = formatGs(currentStudent.balance);
+                }
+
+                if (typeof result.new_stock === 'number') {
+                    product.stock = result.new_stock;
+                }
+            }
+        }
+
+        // Todo ok: limpiar carrito y dar feedback
+        cart = [];
+        renderCart();
+
+        studentCard.style.backgroundColor = '#e8f5e8';
+        setTimeout(() => {
+            studentCard.style.backgroundColor = '';
+        }, 1000);
+
+        showNotification(`✅ Compra cobrada a ${currentStudent.name}`, 'success');
+    } catch (error) {
+        showNotification('Error en el cobro: ' + error.message, 'error');
+    }
+}
+
+// Search students
+async function searchStudents(query) {
+    const trimmed = (query || '').trim();
+    if (!trimmed) {
+        searchResults.innerHTML = '';
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/students?query=${encodeURIComponent(trimmed)}`);
+        const students = await response.json();
+
+        displaySearchResults(students);
+    } catch (error) {
+        console.error('Search error:', error);
+    }
+}
+
+// Quick search students (top of student zone)
+async function quickSearchStudents(query) {
+    const trimmed = (query || '').trim();
+    if (!trimmed) {
+        if (quickSearchResults) {
+            quickSearchResults.innerHTML = '';
+            quickSearchResults.classList.remove('visible');
+        }
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/students?query=${encodeURIComponent(query)}`);
+        const students = await response.json();
+
+        displayQuickSearchResults(students);
+    } catch (error) {
+        console.error('Quick search error:', error);
+    }
+}
+
+// Display search results
+function displaySearchResults(students) {
+    searchResults.innerHTML = '';
+
+    students.forEach((student, index) => {
+        const div = document.createElement('div');
+        div.className = 'search-result';
+        div.innerHTML = `
+            <img src="${student.photo_url || '/default-avatar.png'}" alt="Foto" class="mini-photo" onerror="this.onerror=null;this.src='/default-avatar.png'">
+            <div class="search-info">
+                <div class="search-name">${student.name}</div>
+                <div class="search-grade">${student.grade}</div>
+                <div class="search-balance">${formatGs(student.balance)} Gs.</div>
+            </div>
+        `;
+
+        div.addEventListener('click', () => {
+            navigateToSalesView(student.id);
+        });
+
+        // Keyboard navigation
+        div.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                div.click();
+            } else if (e.key === 'ArrowDown' && index < students.length - 1) {
+                e.preventDefault();
+                searchResults.children[index + 1].focus();
+            } else if (e.key === 'ArrowUp' && index > 0) {
+                e.preventDefault();
+                searchResults.children[index - 1].focus();
+            }
+        });
+
+        searchResults.appendChild(div);
+    });
+
+    // Focus first result
+    if (students.length > 0) {
+        setTimeout(() => searchResults.children[0].focus(), 100);
+    }
+}
+
+// Display quick search results (student zone)
+function displayQuickSearchResults(students) {
+    if (!quickSearchResults) return;
+
+    quickSearchResults.innerHTML = '';
+
+    students.forEach((student) => {
+        const div = document.createElement('div');
+        div.className = 'search-result';
+        div.innerHTML = `
+            <img src="${student.photo_url || '/default-avatar.png'}" alt="Foto" class="mini-photo" onerror="this.onerror=null;this.src='/default-avatar.png'">
+            <div class="search-info">
+                <div class="search-name">${student.name}</div>
+                <div class="search-grade">${student.grade}</div>
+                <div class="search-balance">${student.balance} Gs.</div>
+            </div>
+        `;
+
+        div.addEventListener('click', () => navigateToSalesView(student.id));
+
+        quickSearchResults.appendChild(div);
+    });
+
+    if (students.length > 0) {
+        quickSearchResults.classList.add('visible');
+    } else {
+        quickSearchResults.classList.remove('visible');
+    }
+}
+
+// Setup event listeners
+function setupEventListeners() {
+    // Student card: enter sale mode when clicking recognized/selected student
+    if (studentCard) {
+        studentCard.style.cursor = 'pointer';
+        studentCard.addEventListener('click', () => {
+            if (!currentStudent) return;
+            navigateToSalesView(currentStudent.id);
+        });
+    }
+
+    // Also allow clicking en la tarjeta de alumno dentro de la zona de alumno,
+    // pero ignorar clicks en el buscador rápido para no forzar modo venta.
+    if (studentZone) {
+        studentZone.addEventListener('click', (e) => {
+            if (!currentStudent) return;
+
+            if (quickSearchInput && quickSearchInput.contains(e.target)) return;
+            if (quickSearchResults && quickSearchResults.contains(e.target)) return;
+
+            navigateToSalesView(currentStudent.id);
+        });
+    }
+
+    // Product buttons
+    productButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+            const productId = parseInt(btn.dataset.productId);
+            if (!productId) return;
+            if (!currentStudent) {
+                showNotification('No se detectó alumno', 'error');
+                return;
+            }
+            addToCart(productId);
+        });
+    });
+
+    // Search input (manual search)
+    if (searchInput) {
+        searchInput.addEventListener('input', (e) => {
+            clearTimeout(searchTimeout);
+            const value = e.target.value;
+            searchTimeout = setTimeout(() => searchProducts(value), 150);
+        });
+    }
+
+    // Quick search input (top of student zone)
+    if (quickSearchInput) {
+        quickSearchInput.addEventListener('input', (e) => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => quickSearchStudents(e.target.value), 300);
+        });
+    }
+
+    // Charge button
+    if (chargeBtn) {
+        chargeBtn.addEventListener('click', chargeCart);
+    }
+
+    // Exit sale button (Cerrar)
+    if (exitSaleBtn) {
+        exitSaleBtn.addEventListener('click', () => {
+            clearBtn.click();
+        });
+    }
+
+    // Clear button
+    clearBtn.addEventListener('click', () => {
+        hideStudentCard();
+        selectedProduct = null;
+        selectedProductSpan.textContent = '-';
+        selectedPriceSpan.textContent = '0';
+        productButtons.forEach(btn => btn.classList.remove('selected'));
+        saleMode = false;
+
+        resumeRecognitionAfterMode();
+
+        if (productsZone) {
+            productsZone.classList.add('hidden');
+        }
+
+        if (searchZone) {
+            searchZone.classList.add('hidden');
+        }
+
+        if (videoZone) {
+            videoZone.classList.remove('hidden');
+        }
+
+        if (studentQuickSearch) {
+            studentQuickSearch.classList.remove('hidden');
+        }
+
+        if (productInfoPanel) {
+            productInfoPanel.classList.add('hidden');
+        }
+
+        if (toggleRecognitionBtn) {
+            toggleRecognitionBtn.style.display = '';
+        }
+
+        if (adminBtn) {
+            adminBtn.style.display = '';
+        }
+
+        if (saleCloseBtn) {
+            saleCloseBtn.style.display = 'none';
+        }
+
+        if (activeStudentName) {
+            activeStudentName.textContent = 'Ninguna';
+        }
+    });
+
+    // Enroll button
+    if (enrollBtn) {
+        enrollBtn.addEventListener('click', () => {
+            window.location.href = '/enroll.html';
+        });
+    }
+
+    if (adminBtn) {
+        adminBtn.addEventListener('click', () => {
+            pauseRecognitionForMode(false);
+            window.location.href = '/admin.html';
+        });
+    }
+
+    // Recognition toggle button
+    if (toggleRecognitionBtn) {
+        toggleRecognitionBtn.addEventListener('click', async () => {
+            recognitionEnabled = !recognitionEnabled;
+
+            if (recognitionEnabled) {
+                toggleRecognitionBtn.textContent = 'Apagar reconocimiento';
+                await startCamera();
+                startRecognition();
+                showNotification('Reconocimiento facial activado', 'info');
+            } else {
+                toggleRecognitionBtn.textContent = 'Encender reconocimiento';
+                stopRecognition();
+                stopCamera();
+                recognitionIndicator.textContent = '⛔';
+                recognitionIndicator.className = 'status-indicator warning';
+                cameraIndicator.textContent = '❌';
+                cameraIndicator.className = 'status-indicator error';
+                showNotification('Reconocimiento facial desactivado', 'warning');
+            }
+        });
+    }
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+        // Number keys for products (1-9)
+        if (e.key >= '1' && e.key <= '9') {
+            e.preventDefault();
+            const idx = parseInt(e.key, 10) - 1;
+            if (products[idx]) {
+                if (!currentStudent) {
+                    showNotification('No se detectó alumno', 'error');
+                    return;
+                }
+                addToCart(products[idx].id);
+            }
+            return;
+        }
+
+        // Enter key for charging
+        if (e.key === 'Enter' && currentStudent && cart && cart.length > 0) {
+            e.preventDefault();
+            chargeCart();
+            return;
+        }
+
+        // F2 for search focus
+        if (e.key === 'F2') {
+            e.preventDefault();
+            if (!saleMode && productsZone && searchZone) {
+                enterSaleMode();
+            }
+
+            if (productsZone && searchInput) {
+                setTimeout(() => searchInput.focus(), 50);
+            }
+            return;
+        }
+
+        // Escape key for clear
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            clearBtn.click();
+            return;
+        }
+
+        // Ctrl+E for enrollment
+        if (e.key === 'e' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            window.location.href = '/enroll.html';
+            return;
+        }
+    });
+
+    // Focus search input on page load
+    if (saleMode && searchInput) {
+        searchInput.focus();
+    }
+}
+
+// Notification system
+function showNotification(message, type = 'info') {
+    const notification = document.createElement('div');
+    notification.className = `notification ${type}`;
+    notification.textContent = message;
+
+    const notifications = document.getElementById('notifications');
+    notifications.appendChild(notification);
+
+    setTimeout(() => {
+        notification.remove();
+    }, 5000);
+}
+
+// Initialize when DOM is loaded
+document.addEventListener('DOMContentLoaded', init);

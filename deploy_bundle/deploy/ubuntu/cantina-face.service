@@ -1,0 +1,32 @@
+[Unit]
+Description=Cantina Face Recognition System (FastAPI + Uvicorn)
+After=network-online.target gdm.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=${SILOE_USER}
+Group=${SILOE_GROUP}
+WorkingDirectory=${CANTINA_DIR}
+EnvironmentFile=-/etc/default/cantina-face
+Environment=PYTHONUNBUFFERED=1
+Environment=ORT_INTRA_THREADS=1
+Environment=ORT_INTER_THREADS=1
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=NUMEXPR_NUM_THREADS=1
+
+ExecStartPre=/usr/bin/bash ${CANTINA_DIR}/deploy/ubuntu/preflight.sh
+ExecStart=${CANTINA_DIR}/.venv/bin/python3 -m uvicorn app:app --host 0.0.0.0 --port ${CANTINA_PORT}
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cantina-face
+
+[Install]
+WantedBy=multi-user.target

@@ -5,7 +5,25 @@ __pycache__/
 
 # OS files
 .DS_Store
+._*
+.Spotlight-V100/
+.Trashes
+.fseventsd
 
 # Large model files (no versionar en Git)
-models/*.onnx
-models/*.zip
+/models/*.onnx
+!/models/arcface_r50.onnx
+/models/*.zip
+# USB/offline bundles keep their own copies outside Git
+.test-usb-simulation/deploy_bundle/models/
+deploy_bundle/deploy/usb/OS-FLEX/models/
+deploy_bundle/deploy/usb/OS-FLEX/deploy/project.zip
+dist/deploy_bundle/models/
+
+# Secret env files
+.env-claves
+
+# PHP shared hosting artifacts
+server_php/app/config.php
+server_php/storage/logs/*
+server_php/storage/uploads/*

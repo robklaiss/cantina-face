@@ -60,35 +60,154 @@ Sistema completo de cantina escolar offline con reconocimiento facial y respaldo
 
 3. **Open your browser** and head to `http://localhost:8000/login.html` first, then continue in `index.html`/`admin.html` once authenticated.
 
+## Deploy 1-click (Chromebook / Debian/Ubuntu)
+
+Estos pasos funcionan en un contenedor Debian/Ubuntu limpio (incluido Chromebook Crostini) sin instalaciones manuales adicionales:
+
+1. Copia `project.zip` a tu contenedor y descomprímelo:
+   ```bash
+   unzip project.zip
+   cd cantina-face
+   chmod +x deploy/*.sh
+   ```
+2. Corre el instalador automatizado. Detecta `apt`, usa `sudo` si está disponible e instala `python3`, `python3-venv`, `python3-dev`, `python3-pip`, `build-essential`, `g++`, `rsync` y `lsof`. Luego crea `venv/` dentro del repo y ejecuta `python3 -m pip install -r requirements.txt`:
+   ```bash
+   ./deploy/install.sh
+   ```
+3. **Lanza la app (usa uvicorn directamente). Por defecto se publica en `127.0.0.1:8000`.** Puedes ajustar la vinculación con `HOST=0.0.0.0` (o `BIND=0.0.0.0` para compatibilidad), cambiar puerto con `PORT=9000` y activar recarga en vivo con `RELOAD=1`. Si el puerto ya está ocupado y tienes `lsof`, verás una advertencia:
+   ```bash
+   ./deploy/run.sh
+   # o
+   PORT=9001 RELOAD=1 ./deploy/run.sh
+   ```
+4. Abre `http://localhost:8000/login.html` (o el puerto elegido) para iniciar sesión antes de usar `index.html`.
+
+### Actualizaciones rápidas del zip
+
+`deploy/update.sh` automatiza la rotación de versiones desde un zip de despliegue:
+
+```bash
+./deploy/update.sh                # usa deploy/project.zip por defecto
+./deploy/update.sh /ruta/otra.zip # opcional
+```
+
+- Descomprime en una carpeta temporal, ignore archivos basura de macOS y detecta si el zip trae `cantina-face/` o solo los archivos.
+- Respalda la versión actual como `deploy/backups/cantina-face-YYYYmmdd-HHMMSS.tgz`, manteniendo por defecto los últimos 5 o 7 días (configurable con `BACKUP_MAX_COUNT` y `BACKUP_MAX_AGE_DAYS`).
+- Mantiene `data/` intacto y lo reinserta después del `rsync` (`--delete --exclude venv deploy/backups deploy/project.zip .DS_Store ._*`).
+- Recrea/actualiza `venv/` con `python3` (o `PYTHON_BIN`) y reinstala dependencias automáticamente.
+- Si `rsync`, `unzip` o `python3` faltan, muestra un mensaje claro indicando qué instalar.
+
+> Con esto basta ejecutar `./deploy/update.sh && ./deploy/run.sh` para dejar la instancia al día sin mover carpetas ni correr comandos manuales. No necesitas rutas absolutas: todos los scripts calculan `REPO_DIR` automáticamente.
+
+### Autoarranque y kiosco listo para usar
+
+El modo kiosco ahora se configura directamente con los scripts estándar. Instala dependencias y crea el servicio/autostart/shortcut ejecutando:
+
+```bash
+chmod +x deploy/install.sh deploy/update.sh
+./deploy/install.sh --setup-autostart
+# o si ya tenías la app instalada:
+./deploy/update.sh --setup-autostart
+```
+
+Las banderas `--setup-autostart` generan:
+
+1. **Servicio systemd** `cantina-face.service` (personalizable) que llama a `deploy/run.sh` en cada arranque.
+2. **Autostart gráfico** en `~/.config/autostart/` que abre `http://localhost:8000/login.html` tras iniciar sesión.
+3. **Acceso directo** `~/Desktop/CantinaFace.desktop` para iniciar manualmente y abrir el login.
+
+> Tip: tanto `deploy/install.sh` como `deploy/update.sh` ejecutan automáticamente `deploy/backup_faces.sh` antes de tocar el código, dejando las copias `db-backup-01..03` listas por si necesitas restaurar la base facial.
+
+Variables opcionales (exporta antes de ejecutar el comando):
+
+- `SERVICE_NAME`: nombre del servicio systemd (default `cantina-face`).
+- `LOGIN_URL`: URL a abrir (default `http://localhost:8000/login.html`).
+- `TARGET_USER`: dueño del servicio/autostart (default usuario que corre el script).
+- `AUTOSTART_DISPLAY`: display X11 (default `:0`).
+- `ICON_PATH_OVERRIDE`: ruta alternativa para el ícono del acceso directo.
+
+Administración rápida del servicio:
+
+```bash
+sudo systemctl status cantina-face
+sudo systemctl restart cantina-face
+sudo systemctl disable cantina-face  # si quieres desactivarlo
+```
+
+> Requisitos: distro con systemd, `sudo`, sesión gráfica y el repo alojado en el home del usuario configurado.
+
 ## Acceso y Autenticación
 
 1. Dirígete a `http://localhost:8000/login.html`.
-2. Ingresa el usuario y contraseña del personal (el sistema crea `admin@siloe.com.py / admin321` si no existe).
+2. Ingresa el usuario y contraseña del personal (el sistema crea `admin@siloe.com.py / admin123` si no existe).
 3. Tras iniciar sesión se guarda un token JWT en `localStorage` y se redirige a la última página solicitada.
 4. Usa los botones "Cerrar sesión" en `index.html` o `admin.html` para limpiar el token y volver a la pantalla de login.
 
 > Si el token expira o se borra, cualquier visita a `index.html`/`admin.html` redireccionará automáticamente a la pantalla de acceso.
 
-## Chromebook / ChromeOS (Instalador Local)
+### Reset oficial de contraseñas (DB local correcta)
 
-1. **Activa Linux (Beta)** en *Configuración → Avanzado → Desarrolladores → Linux* y establece al menos 10 GB de espacio.
+El único script soportado para resetear/crear usuarios administra siempre `data/db.sqlite` dentro del repo:
+
+```bash
+cd cantina-face
+source venv/bin/activate
+python deploy/reset_password.py \
+  --email admin@siloe.com.py \
+  --prompt-password \
+  --create      # opcional, crea el usuario si no existe
+```
+
+## Chromebook / ChromeOS Flex (Instalador Local)
+
+### Instalación inicial
+
+1. **Activa Linux (Beta)** en *Configuración → Avanzado → Desarrolladores → Linux* y establece al menos 10 GB de espacio.
 2. **Copia la carpeta del proyecto** (por USB, Drive o Git) dentro de `Archivos → Linux`.
-3. **Abre la terminal de Linux** y marca los scripts como ejecutables:
+3. **Abre la terminal de Linux** y ejecuta la instalación completa:
    ```bash
-   chmod +x setup.sh run.sh
+   cd cantina-face
+   chmod +x deploy/install.sh deploy/run.sh
+   bash deploy/install.sh --setup-autostart
    ```
-4. **Ejecuta la preparación** (solo la primera vez o cuando cambien dependencias):
-   ```bash
-   ./setup.sh
-   ```
-   Esto crea el entorno virtual y corre `pip install -r requirements.txt` dentro del contenedor de Linux.
-5. **Arranca el servidor local** cada vez que quieras usar la app:
-   ```bash
-   ./run.sh
-   ```
-   El script activa el entorno virtual y lanza `uvicorn app:app --reload`.
-6. **Abre el navegador de ChromeOS** en `http://localhost:8000/login.html`, inicia sesión y luego navega a `index.html` o `admin.html`.
-7. **Detén el servidor** con `Ctrl+C` en la terminal cuando termines.
+   Esto instala dependencias, crea el entorno virtual, configura el servicio para que arranque automáticamente y crea un acceso directo en el launcher de ChromeOS.
+
+### Inicio automático al encender
+
+Para que el sistema arranque **sin intervención** al prender la máquina:
+
+1. Abre **Chrome** en la barra de direcciones y ve a `chrome://flags`
+2. Busca **"Start Linux on login"** (o `#crostini-use-lxd-5`)
+3. Cámbialo a **Enabled** y reinicia ChromeOS
+
+Con esto, al encender la máquina → ChromeOS inicia → Linux arranca automáticamente → el servicio de Cantina Face se levanta solo.
+
+### Acceso directo (alternativa manual)
+
+Si prefieres iniciar manualmente con un clic:
+
+1. Abre el **launcher** de ChromeOS (el cajón de apps)
+2. Busca **"Cantina Face"** — aparece como app de Linux
+3. Haz clic derecho → **Anclar al estante** para tenerlo siempre visible en la barra inferior
+4. Al hacer clic, inicia el servidor y abre el navegador automáticamente
+
+### Inicio manual desde terminal
+
+Si necesitas iniciar manualmente desde la terminal de Linux:
+```bash
+cd cantina-face
+./deploy/run.sh
+```
+Luego abre `http://localhost:8000/login.html` en el navegador de ChromeOS.
+
+### Comandos útiles (ChromeOS)
+
+| Acción | Comando |
+|--------|---------|
+| Ver estado del servicio | `systemctl --user status cantina-face` |
+| Reiniciar servicio | `systemctl --user restart cantina-face` |
+| Ver logs | `journalctl --user -u cantina-face -f` |
+| Detener servicio | `systemctl --user stop cantina-face` |
 
 ## Guía de Uso
 
@@ -195,10 +314,53 @@ The system includes basic spoof protection using facial movement analysis:
 - **Transactions**: Student ID, product ID, amount, timestamp
 
 ### Performance
-- **Recognition Speed**: <10ms per frame on modern hardware
-- **Storage**: ~5KB per student (embedding + mini photo)
+- **Recognition Speed**: <10ms per frame en escenarios normales
+- **Storage**: ~5KB por estudiante (embedding + mini photo)
 - **Memory**: ~200MB RAM usage
-- **CPU**: Optimized for CPU-only inference
+- **CPU**: Optimized for CPU-only inference gracias a throttling y cacheo de embeddings
+
+Tuning clave vía variables de entorno:
+
+| Variable | Default | Descripción |
+| --- | --- | --- |
+| `FACE_MAX_EMB_PER_SEC` | `2` | Límite de embeddings por segundo por cámara (cooldown automático). |
+| `FACE_CACHE_MS` | `500` | Ventana de cache en ms para reusar coincidencias cuando el rostro no cambia. |
+| `FACE_CACHE_IOU` | `0.7` | IoU mínima entre bounding boxes para considerar la cara la misma. |
+| `FACE_DETECT_WIDTH` | `640` | Ancho al que se normaliza el frame para detección (reduce CPU). |
+| `ORT_INTRA_THREADS` / `ORT_INTER_THREADS` | `1` | Controlan los hilos de onnxruntime para evitar saturar la CPU. |
+| `CV2_NUM_THREADS` | `1` | Limita threads internos de OpenCV. |
+
+Además, `/api/health/timing` (requiere autenticación) devuelve un resumen JSON de los últimos `PERF_WINDOW_SECONDS` segundos, agregando métricas de detección/embedding y la cola de requests recientes capturada por el middleware de FastAPI. Ejemplo abreviado:
+
+```json
+{
+  "window_seconds": 10,
+  "face": {
+    "detect": { "count": 8, "avg_ms": 7.9, "p95_ms": 9.1, "max_ms": 11.2 },
+    "embed": { "count": 4, "avg_ms": 53.3, "p95_ms": 58.4, "max_ms": 60.0 }
+  },
+  "requests": { "count": 25, "avg_ms": 12.4, "p95_ms": 19.7, "max_ms": 22.1 }
+}
+```
+
+Usa esto para verificar que los embeddings bajen drásticamente (<= ~20/100s) en hardware limitado o para detectar endpoints lentos en la caja.
+
+#### Diagnóstico y benchmark del checkout
+
+El script `scripts/bench_checkout.py` automatiza una sesión mínima del flujo de caja para medir latencias de `/api/products`, `/api/students/{id}` y `/api/students/{id}/scheduled-orders`. Ejecútalo dentro del repo (venv opcional):
+
+```bash
+python scripts/bench_checkout.py \
+  --username admin@siloe.com.py \
+  --password "admin123" \
+  --iterations 5
+```
+
+Notas:
+
+1. El script obtiene un token vía `/auth/token` y reusa el primer alumno disponible, salvo que pases `--student-id`.
+2. Reporta `avg/p95/max` por endpoint y, al finalizar, imprime el payload crudo de `/api/health/timing` para correlacionar los resultados.
+3. Puedes apuntarlo a otra máquina con `--base-url http://IP:PUERTO` (por defecto `http://127.0.0.1:8000`).
 
 ## Configuration
 
@@ -247,6 +409,36 @@ video: {
 - Use strong passwords for device access
 - Regularly backup the `data/` directory
 - Monitor transaction logs for irregularities
+
+### Respaldos de la base facial
+
+Para no perder embeddings ni miniaturas críticas, se añadió `deploy/backup_faces.sh`, que crea hasta 3 copias rotativas (`db-backup-01`, `-02`, `-03`) dentro de `data/backups/`:
+
+```bash
+chmod +x deploy/backup_faces.sh
+./deploy/backup_faces.sh            # usa data/ y 3 copias por defecto
+BACKUP_COUNT=5 BACKUP_DIR=/mnt/usb/backups \
+    ./deploy/backup_faces.sh        # ejemplo con destino externo
+```
+
+Qué incluye cada backup:
+
+1. `db.sqlite` (usando `sqlite3 .backup` cuando está disponible para un snapshot consistente)
+2. `index.bin` + `index_labels.json` del índice HNSW
+3. Carpeta `data/faces/` con las miniaturas
+
+Ejemplo de cron para ejecutarlo cada 6 horas y guardar registros:
+
+```cron
+0 */6 * * * /ruta/a/cantina-face/deploy/backup_faces.sh \
+    >> /var/log/cantina-face-backup.log 2>&1
+```
+
+Recomendaciones:
+
+- Verificar periódicamente que `data/backups/db-backup-01` existe y contiene `backup-info.txt`
+- Sincronizar manualmente estas carpetas a un medio externo o a otra máquina segura
+- Ejecutar el script antes de actualizaciones mayores o reinstalaciones
 
 ## Troubleshooting
 
